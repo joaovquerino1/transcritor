@@ -9,3 +9,4 @@ __pycache__/
 build-x64/
 dist-x64/
 dist-build/
+*.egg-info/
