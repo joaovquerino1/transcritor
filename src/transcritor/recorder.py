@@ -313,6 +313,8 @@ class MacRecorder(Recorder):
 
 
 # =================================================================== Windows
+_sc_lock = threading.Lock()
+
 class WinRecorder(Recorder):
     def __init__(self) -> None:
         self._stop = threading.Event()
@@ -333,8 +335,11 @@ class WinRecorder(Recorder):
 
         import numpy as np
         try:
-            ctypes.windll.ole32.CoInitializeEx(None, 0)     # COM multithread nesta thread
-            import soundcard as sc
+            # O soundcard inicializa o COM ao ser importado e trata "já inicializado" como erro:
+            # importa primeiro (uma thread por vez) e só depois garante o COM nesta thread.
+            with _sc_lock:
+                import soundcard as sc
+            ctypes.windll.ole32.CoInitializeEx(None, 0)
             if kind == "system":
                 dev = sc.get_microphone(id=str(sc.default_speaker().name), include_loopback=True)
             else:
