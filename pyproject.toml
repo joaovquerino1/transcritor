@@ -1,6 +1,6 @@
 [project]
 name = "transcritor"
-version = "1.0.1"
+version = "1.1.0"
 description = "Transcrição de vídeos com identificação de falantes, usando modelos de IA gratuitos e locais."
 requires-python = ">=3.10,<3.14"
 dependencies = [
@@ -9,6 +9,9 @@ dependencies = [
     "av>=14",
     "numpy>=1.26",
     "PySide6-Essentials>=6.7",
+    "PySide6-WebEngine>=6.10",
+    "yt-dlp[default]>=2025.11",
+    "imageio-ffmpeg>=0.5",
     "python-docx>=1.1",
     "huggingface-hub>=0.25",
 ]

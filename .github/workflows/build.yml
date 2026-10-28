@@ -52,6 +52,22 @@ jobs:
           grep -q "Falante 2" smoke/reuniao.txt
           grep -qi "trimestre" smoke/reuniao.txt
 
+      - name: Teste de download (manifesto DASH, mesmo caminho das gravações do Teams)
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            EXE=dist/Transcritor/Transcritor.exe
+            LOG="$LOCALAPPDATA/Transcritor/transcritor.log"
+          else
+            EXE=dist/Transcritor.app/Contents/MacOS/Transcritor
+            LOG=/dev/null
+          fi
+          mkdir -p smoke-dl
+          "$EXE" --cli "https://dash.akamaized.net/akamai/bbb_30fps/bbb_30fps.mpd" --sem-falantes --modelo small --formatos txt --saida smoke-dl || { cat "$LOG"; exit 1; }
+          cat "$LOG" || true
+          ls -la smoke-dl
+          test -s smoke-dl/gravacao.m4a
+
       - name: Instalador Windows (Inno Setup)
         if: runner.os == 'Windows'
         shell: pwsh

@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
 )
 
-from . import __version__, export, models
+from . import __version__, downloader, export, models
 from .engine import LANGUAGES, Engine, Options, Transcript, fmt_time, output_stem
 
 MEDIA_EXTS = {
@@ -44,7 +44,7 @@ class FileList(QListWidget):
         super().__init__()
         self.setAcceptDrops(True)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.setMinimumHeight(140)
+        self.setMinimumHeight(110)
 
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls():
@@ -111,6 +111,38 @@ class Worker(QObject):
         self.finished.emit()
 
 
+class DownloadWorker(QObject):
+    progress = Signal(str, float)
+    log = Signal(str)
+    downloaded = Signal(list)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, jobs: list[tuple[str, str]], out_dir: Path, keep_video: bool,
+                 cancel: threading.Event) -> None:
+        super().__init__()
+        self.jobs, self.out_dir, self.keep_video, self.cancel = jobs, out_dir, keep_video, cancel
+
+    @Slot()
+    def run(self) -> None:
+        for url, title in self.jobs:
+            if self.cancel.is_set():
+                break
+            self.log.emit(f"— Baixando {title or url}")
+            try:
+                paths = downloader.download(url, self.out_dir, self.keep_video,
+                                            self.progress.emit, self.log.emit, self.cancel, title)
+                for p in paths:
+                    self.log.emit(f"Baixado: {p}")
+                self.downloaded.emit(paths)
+            except InterruptedError:
+                break
+            except Exception as e:
+                self.log.emit(traceback.format_exc())
+                self.failed.emit(str(e))
+        self.finished.emit()
+
+
 def save_outputs(tr: Transcript, formats: list[str], out_dir: Optional[str]) -> list[Path]:
     stem = output_stem(tr.source)
     if out_dir:
@@ -122,7 +154,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Transcritor")
-        self.resize(1180, 760)
+        self.resize(1180, 860)
         self.settings = QSettings("Transcritor", "Transcritor")
         self.engine = Engine()
         self.files: list[dict] = []       # {path, status, transcript, outputs}
@@ -130,6 +162,7 @@ class MainWindow(QMainWindow):
         self.worker: Optional[Worker] = None
         self.cancel = threading.Event()
         self.current_row = -1
+        self.dl_new: list[str] = []
 
         self._build_ui()
         self._load_settings()
@@ -156,6 +189,33 @@ class MainWindow(QMainWindow):
         for b in (self.btn_add, self.btn_remove, self.btn_clear):
             row.addWidget(b)
         lv.addLayout(row)
+
+        dl = QGroupBox("Baixar da internet")
+        dv = QVBoxLayout(dl)
+        row = QHBoxLayout()
+        self.ed_url = QLineEdit()
+        self.ed_url.setPlaceholderText("Cole um link do YouTube, Teams, SharePoint, Vimeo, Instagram…")
+        self.ed_url.setClearButtonEnabled(True)
+        self.ed_url.returnPressed.connect(self.download_url)
+        self.btn_dl = QPushButton("Baixar")
+        self.btn_dl.clicked.connect(self.download_url)
+        row.addWidget(self.ed_url, 1)
+        row.addWidget(self.btn_dl)
+        dv.addLayout(row)
+        row = QHBoxLayout()
+        self.btn_login = QPushButton("Teams / SharePoint (com login)…")
+        self.btn_login.setToolTip("Abre um navegador para entrar com sua conta e capturar gravações\n"
+                                  "do Teams, SharePoint, OneDrive, Stream ou outros sites com login.")
+        self.btn_login.clicked.connect(lambda: self.open_login())
+        self.ck_video = QCheckBox("Manter o vídeo")
+        self.ck_video.setToolTip("Desmarcado: baixa só o áudio, mais rápido e suficiente para transcrever.")
+        self.ck_auto = QCheckBox("Transcrever ao terminar")
+        row.addWidget(self.btn_login)
+        row.addStretch(1)
+        row.addWidget(self.ck_video)
+        row.addWidget(self.ck_auto)
+        dv.addLayout(row)
+        lv.addWidget(dl)
 
         box = QGroupBox("Configurações")
         form = QFormLayout(box)
@@ -313,6 +373,8 @@ class MainWindow(QMainWindow):
         saved = s.value("formats", "txt,docx,srt", type=str).split(",")
         for k, c in self.ck_fmt.items():
             c.setChecked(k in saved)
+        self.ck_video.setChecked(s.value("keep_video", False, type=bool))
+        self.ck_auto.setChecked(s.value("auto_transcribe", True, type=bool))
         self._sync_enabled()
 
     def _save_settings(self) -> None:
@@ -324,6 +386,8 @@ class MainWindow(QMainWindow):
         s.setValue("sensitivity", self.sl_sens.value())
         s.setValue("out_dir", self.ed_out.text())
         s.setValue("formats", ",".join(self._formats()))
+        s.setValue("keep_video", self.ck_video.isChecked())
+        s.setValue("auto_transcribe", self.ck_auto.isChecked())
 
     @staticmethod
     def _set_combo(cb: QComboBox, data) -> None:
@@ -430,11 +494,102 @@ class MainWindow(QMainWindow):
         self.status.setText("Cancelando…")
         self.btn_cancel.setEnabled(False)
 
+    # ------------------------------------------------------------ download
+    def _download_dir(self) -> Path:
+        out = self.ed_out.text().strip()
+        if out and Path(out).is_dir():
+            return Path(out)
+        return downloader.default_download_dir()
+
+    def download_url(self) -> None:
+        url = self.ed_url.text().strip()
+        if not url:
+            self.ed_url.setFocus()
+            return
+        if not url.lower().startswith(("http://", "https://")):
+            url = "https://" + url
+        if downloader.classify(url) == "login":
+            self.open_login(url)
+        else:
+            self.start_download([(url, "")])
+
+    def open_login(self, url: str = "") -> None:
+        from .login_browser import LoginBrowser
+
+        start = url or self.settings.value("login_url", "https://www.office.com", type=str)
+        dlg = LoginBrowser(start, self._download_dir(), self)
+        dlg.exec()
+        self.settings.setValue("login_url", dlg.ed_url.text() or start)
+        if dlg.files:
+            self.add_files(dlg.files)
+        if dlg.selected:
+            self.ed_url.clear()
+            self.start_download(dlg.selected)
+        elif dlg.files and self.ck_auto.isChecked():
+            self.start()
+
+    def start_download(self, jobs: list[tuple[str, str]]) -> None:
+        if self.thread:
+            return
+        self._save_settings()
+        self.cancel.clear()
+        self.dl_new = []
+        self.thread = QThread()
+        self.worker = DownloadWorker(jobs, self._download_dir(), self.ck_video.isChecked(), self.cancel)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.worker.progress.connect(self.on_dl_progress)
+        self.worker.log.connect(self.append_log)
+        self.worker.downloaded.connect(self.on_downloaded)
+        self.worker.failed.connect(self.on_dl_failed)
+        self.worker.finished.connect(self.on_dl_finished)
+        self._running(True)
+        self.thread.start()
+
+    @Slot(str, float)
+    def on_dl_progress(self, msg: str, frac: float) -> None:
+        self.status.setText(msg)
+        if frac < 0:
+            self.bar.setRange(0, 0)
+        else:
+            self.bar.setRange(0, 1000)
+            self.bar.setValue(int(frac * 1000))
+
+    @Slot(list)
+    def on_downloaded(self, paths: list) -> None:
+        self.dl_new += paths
+        self.add_files(paths)
+        self.ed_url.clear()
+
+    @Slot(str)
+    def on_dl_failed(self, msg: str) -> None:
+        self.append_log(f"Erro no download: {msg}")
+        self.tabs.setCurrentIndex(1)
+        QMessageBox.warning(self, "Transcritor", f"Não foi possível baixar:\n\n{msg}")
+
+    @Slot()
+    def on_dl_finished(self) -> None:
+        self.thread.quit()
+        self.thread.wait()
+        self.thread = None
+        self.worker = None
+        self._running(False)
+        self.bar.setRange(0, 1000)
+        self.bar.setValue(0)
+        if self.cancel.is_set():
+            self.status.setText("Download cancelado.")
+            return
+        n = len(self.dl_new)
+        self.status.setText(f"{n} arquivo(s) baixado(s) em {self._download_dir()}." if n else "Nada foi baixado.")
+        if n and self.ck_auto.isChecked():
+            self.start()
+
     def _running(self, on: bool) -> None:
         self.btn_start.setEnabled(not on)
         self.btn_cancel.setEnabled(on)
         for w in (self.btn_add, self.btn_remove, self.btn_clear, self.cb_lang, self.cb_model,
                   self.ck_diar, self.sp_speakers, self.sl_sens, self.ed_hot, self.ed_out,
+                  self.ed_url, self.btn_dl, self.btn_login, self.ck_video, self.ck_auto,
                   *self.ck_fmt.values()):
             w.setEnabled(not on)
         if not on:
@@ -583,7 +738,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e) -> None:
         if self.thread:
             if QMessageBox.question(self, "Transcritor",
-                                    "Uma transcrição está em andamento. Deseja cancelar e sair?") \
+                                    "Uma tarefa está em andamento. Deseja cancelar e sair?") \
                     != QMessageBox.StandardButton.Yes:
                 e.ignore()
                 return
@@ -601,6 +756,13 @@ def main() -> int:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Transcritor.App")
         except Exception:
             pass
+    try:
+        # O QtWebEngine (navegador de login) precisa ser carregado antes do QApplication.
+        from PySide6 import QtWebEngineWidgets  # noqa: F401
+        from PySide6.QtCore import QCoreApplication
+        QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
+    except ImportError:
+        pass
     app = QApplication(sys.argv)
     app.setApplicationName("Transcritor")
     app.setApplicationVersion(__version__)
@@ -610,6 +772,12 @@ def main() -> int:
     win = MainWindow()
     win.show()
     for arg in sys.argv[1:]:
+        if arg.lower().startswith(("http://", "https://")):
+            # Link passado na abertura: baixa (ou abre o navegador de login, se for Teams/SharePoint).
+            from PySide6.QtCore import QTimer
+            win.ed_url.setText(arg)
+            QTimer.singleShot(300, win.download_url)
+            break
         if Path(arg).is_file():
             win.add_files([arg])
     return app.exec()

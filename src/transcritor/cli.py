@@ -7,13 +7,14 @@ import sys
 import threading
 from pathlib import Path
 
-from . import export, models
+from . import downloader, export, models
 from .engine import LANGUAGES, Engine, Options
 
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="Transcritor --cli", description="Transcreve vídeos com identificação de falantes.")
-    ap.add_argument("arquivos", nargs="+")
+    ap.add_argument("arquivos", nargs="+", help="arquivos ou links (YouTube, stream .m3u8/.mpd…)")
+    ap.add_argument("--manter-video", action="store_true", help="ao baixar links, manter o vídeo")
     ap.add_argument("--idioma", choices=list(LANGUAGES), default="pt")
     ap.add_argument("--modelo", choices=[m.key for m in models.WHISPER_MODELS], default="large-v3-turbo")
     ap.add_argument("--falantes", type=int, default=0, help="0 = automático")
@@ -35,7 +36,24 @@ def main(argv: list[str]) -> int:
             print(f"  {msg}", flush=True)
 
     errors = 0
-    for path in args.arquivos:
+    paths: list[str] = []
+    for item in args.arquivos:
+        if not item.lower().startswith(("http://", "https://")):
+            paths.append(item)
+            continue
+        print(f"== Baixando {item}", flush=True)
+        try:
+            out = Path(args.saida) if args.saida else downloader.default_download_dir()
+            got = downloader.download(item, out, args.manter_video, progress,
+                                      lambda m: print(f"  {m}", flush=True), cancel)
+            for g in got:
+                print(f"  Baixado: {g}", flush=True)
+            paths += got
+        except Exception as e:
+            errors += 1
+            print(f"  ERRO: {e}", file=sys.stderr, flush=True)
+
+    for path in paths:
         print(f"== {path}", flush=True)
         try:
             tr = engine.run(path, opts, progress, lambda m: print(f"  {m}", flush=True), cancel)
