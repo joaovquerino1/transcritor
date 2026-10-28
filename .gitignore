@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 *.dmg
 .DS_Store
+.venv-x64/
+build-x64/
+dist-x64/
