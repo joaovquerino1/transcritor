@@ -31,6 +31,27 @@ jobs:
       - name: PyInstaller
         run: pyinstaller packaging/transcritor.spec --noconfirm --distpath dist --workpath build
 
+      - name: Teste real com o app empacotado
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            EXE=dist/Transcritor/Transcritor.exe
+            LOG="$LOCALAPPDATA/Transcritor/transcritor.log"
+          else
+            EXE=dist/Transcritor.app/Contents/MacOS/Transcritor
+            LOG=/dev/null
+          fi
+          mkdir -p smoke
+          if ! "$EXE" --cli tests/fixtures/reuniao.mp4 --modelo small --formatos txt,docx,srt --saida smoke; then
+            cat "$LOG" || true
+            exit 1
+          fi
+          cat "$LOG" || true
+          cat smoke/reuniao.txt
+          test -s smoke/reuniao.docx && test -s smoke/reuniao.srt
+          grep -q "Falante 2" smoke/reuniao.txt
+          grep -qi "trimestre" smoke/reuniao.txt
+
       - name: Instalador Windows (Inno Setup)
         if: runner.os == 'Windows'
         shell: pwsh
