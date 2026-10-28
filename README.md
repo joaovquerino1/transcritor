@@ -22,6 +22,8 @@ Otimizado para **português do Brasil** e **inglês** (também tem detecção au
   2. Abra a gravação e aperte **play**.
   3. Quando aparecer **Vídeo detectado!**, clique em **Baixar vídeo**.
 
+  O app tenta, em ordem: o link do manifesto lido do próprio player do SharePoint, o extrator do SharePoint do yt-dlp com o seu login, e o manifesto capturado na rede (com os cabeçalhos de autorização). A aba **Registro** mostra cada tentativa.
+
   Se a gravação tiver o botão **Baixar** do próprio SharePoint, ele também funciona nesse navegador.
 - Por padrão o app baixa só o áudio (mais rápido e suficiente para transcrever). Marque **Manter o vídeo** para salvar o vídeo em MP4.
 - Com **Transcrever ao terminar** marcado, a transcrição começa sozinha depois do download.
@@ -35,6 +37,18 @@ Dicas:
 - Se você sabe quantas pessoas falam, informe em **Nº de falantes**: é o que mais melhora a identificação.
 - Em modo automático, use **Separação de vozes**: aumente se pessoas diferentes saírem juntas, diminua se a mesma pessoa virar vários falantes.
 - Em **Vocabulário**, coloque nomes próprios e siglas que aparecem no vídeo (ex.: `Querino, Itaú, OKR, Kubernetes`).
+
+## Gravar reunião
+
+Para transcrever uma chamada (Teams, Zoom, Meet, WhatsApp…) enquanto ela acontece:
+
+1. Em **Gravar reunião**, escolha o que gravar: **Tela**, **Som do computador** (as vozes dos outros participantes) e **Microfone** (a sua voz).
+2. Clique em **● Gravar**. Um ícone vermelho aparece na barra de menus (macOS) ou na bandeja (Windows), com a opção **Parar e transcrever**.
+3. Ao terminar, clique em **■ Parar e transcrever**. O arquivo `Reunião AAAA-MM-DD HHhMM.mp4` (ou `.m4a`, sem a tela) é salvo e a transcrição começa sozinha com as configurações atuais.
+
+- **macOS**: precisa do macOS 15 ou mais novo. Na primeira vez, autorize em Ajustes do Sistema > Privacidade e Segurança > **Gravação de Tela e Áudio do Sistema** e **Microfone**. Como o app não é assinado pela Apple, pode ser preciso autorizar de novo depois de cada atualização.
+- **Windows**: grava o áudio do alto-falante/fone padrão e o microfone padrão. A tela inclui todos os monitores.
+- Avise os participantes antes de gravar e siga as regras da sua empresa e a legislação aplicável.
 
 ## Modelos usados (todos gratuitos e abertos)
 
@@ -78,9 +92,10 @@ Para rodar a partir do código: `python run.py`.
 ```bash
 Transcritor --cli entrevista.mp4 --idioma pt --falantes 2 --formatos txt,docx,srt
 Transcritor --cli "https://www.youtube.com/watch?v=..." --idioma auto
+Transcritor --cli --gravar 0          # grava a reunião até apertar Enter e transcreve
 ```
 
-No macOS o executável fica em `/Applications/Transcritor.app/Contents/MacOS/Transcritor`. Opções: `--idioma pt|en|auto|mixed`, `--modelo large-v3-turbo|large-v3|medium|small`, `--falantes N`, `--sem-falantes`, `--vocabulario "..."`, `--saida pasta`.
+No macOS o executável fica em `/Applications/Transcritor.app/Contents/MacOS/Transcritor`. Opções: `--idioma pt|en|auto|mixed`, `--modelo large-v3-turbo|large-v3|medium|small`, `--falantes N`, `--sem-falantes`, `--vocabulario "..."`, `--saida pasta`, `--gravar SEGUNDOS`, `--sem-tela`, `--sem-microfone`.
 
 ## Estrutura
 

@@ -22,6 +22,12 @@ hiddenimports = collect_submodules("sherpa_onnx") + ["ctranslate2", "av", "token
 hiddenimports += collect_submodules("yt_dlp") + ["yt_dlp_ejs", "imageio_ffmpeg"]
 # Dependências opcionais do yt-dlp (o yt-dlp atualizado em tempo de execução também as usa)
 hiddenimports += ["brotli", "certifi", "mutagen", "Cryptodome", "websockets", "requests", "urllib3"]
+# Gravação de reuniões: ScreenCaptureKit (macOS) e loopback WASAPI (Windows)
+if sys.platform == "darwin":
+    hiddenimports += ["objc", "Foundation", "AppKit", "Quartz", "CoreMedia", "AVFoundation",
+                      "ScreenCaptureKit"]
+elif sys.platform == "win32":
+    hiddenimports += ["soundcard", "soundcard.mediafoundation", "cffi"]
 
 excludes = [
     "tkinter", "matplotlib", "PIL", "IPython", "pytest", "scipy", "pandas", "torch",
@@ -99,6 +105,9 @@ if sys.platform == "darwin":
             # Apenas Apple Silicon: nunca abrir via Rosetta.
             "LSRequiresNativeExecution": True,
             "LSArchitecturePriority": ["arm64"],
+            "NSMicrophoneUsageDescription": "O Transcritor grava a sua voz nas reuniões que você escolher gravar.",
+            "NSAudioCaptureUsageDescription": "O Transcritor grava o som das reuniões que você escolher gravar.",
+            "NSScreenCaptureUsageDescription": "O Transcritor grava a tela das reuniões que você escolher gravar.",
             "NSHumanReadableCopyright": "Software livre. Modelos: OpenAI Whisper (MIT), pyannote (MIT), WeSpeaker (Apache 2.0).",
         },
     )

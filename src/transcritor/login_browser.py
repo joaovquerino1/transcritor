@@ -8,6 +8,8 @@ suportados.
 
 from __future__ import annotations
 
+import json
+import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -24,11 +26,15 @@ from PySide6.QtWidgets import (
 )
 
 from . import models
+from .downloader import SHAREPOINT_PAGE, Job, sharepoint_manifest
 
 _MANIFEST = re.compile(r"videomanifest|\.m3u8(\?|$)|\.mpd(\?|$)", re.I)
 _SEGMENT = re.compile(r"[/_-](seg|segment|frag|chunk)[-_]?\d|\.(ts|m4s)(\?|$)", re.I)
 
 _profile: Optional[QWebEngineProfile] = None
+_cookies: dict = {}      # (domínio, caminho, nome) -> QNetworkCookie
+# Cabeçalhos da requisição do manifesto que vale a pena repetir no download.
+_KEEP_HEADERS = {"authorization", "x-ms-client-request-id", "origin", "referer", "user-agent"}
 
 
 def profile() -> QWebEngineProfile:
@@ -46,7 +52,55 @@ def profile() -> QWebEngineProfile:
         # Alguns logins corporativos recusam navegadores "desconhecidos": remove o sufixo QtWebEngine.
         ua = re.sub(r"\s*QtWebEngine/\S+", "", _profile.httpUserAgent())
         _profile.setHttpUserAgent(ua)
+        store = _profile.cookieStore()
+        store.cookieAdded.connect(_cookie_added)
+        store.cookieRemoved.connect(_cookie_removed)
+        store.loadAllCookies()
     return _profile
+
+
+def _ckey(c) -> tuple:
+    return (c.domain(), c.path(), bytes(c.name()).decode("utf-8", "replace"))
+
+
+def _cookie_added(c) -> None:
+    _cookies[_ckey(c)] = c
+
+
+def _cookie_removed(c) -> None:
+    _cookies.pop(_ckey(c), None)
+
+
+def export_cookies() -> str:
+    """Grava os cookies do login num arquivo no formato Netscape (usado pelo yt-dlp)."""
+    path = models.data_dir() / "cookies.txt"
+    lines = ["# Netscape HTTP Cookie File"]
+    for c in list(_cookies.values()):
+        domain = c.domain()
+        if not domain:
+            continue
+        expiry = 0 if c.isSessionCookie() else int(c.expirationDate().toSecsSinceEpoch())
+        name = bytes(c.name()).decode("utf-8", "replace")
+        value = bytes(c.value()).decode("utf-8", "replace")
+        lines.append("\t".join([domain, "TRUE" if domain.startswith(".") else "FALSE",
+                                c.path() or "/", "TRUE" if c.isSecure() else "FALSE",
+                                str(expiry), name, value]))
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return str(path)
+
+
+def _headers(info: QWebEngineUrlRequestInfo) -> dict:
+    out = {}
+    try:
+        for k, v in dict(info.httpHeaders()).items():
+            k = bytes(k).decode("latin-1")
+            if k.lower() in _KEEP_HEADERS:
+                out[k] = bytes(v).decode("latin-1")
+    except Exception:
+        pass
+    return out
 
 
 class Interceptor(QWebEngineUrlRequestInterceptor):
@@ -58,15 +112,22 @@ class Interceptor(QWebEngineUrlRequestInterceptor):
         url = info.requestUrl().toString()
         if not url.startswith("http"):
             return
-        if _MANIFEST.search(url) and not _SEGMENT.search(url):
-            self.sink.found.emit(url, "stream")
-        elif info.resourceType() == QWebEngineUrlRequestInfo.ResourceType.ResourceTypeMedia \
+        rt = info.resourceType()
+        if rt in (QWebEngineUrlRequestInfo.ResourceType.ResourceTypeMainFrame,
+                  QWebEngineUrlRequestInfo.ResourceType.ResourceTypeSubFrame) \
+                and SHAREPOINT_PAGE.match(url):
+            # Página do player do SharePoint (direto ou dentro do Teams).
+            self.sink.page.emit(url)
+        elif _MANIFEST.search(url) and not _SEGMENT.search(url):
+            self.sink.found.emit(url, "stream", _headers(info))
+        elif rt == QWebEngineUrlRequestInfo.ResourceType.ResourceTypeMedia \
                 and re.search(r"\.(mp4|m4a|mov|webm|mp3)(\?|$)", url, re.I):
-            self.sink.found.emit(url, "arquivo")
+            self.sink.found.emit(url, "arquivo", _headers(info))
 
 
 class Sink(QObject):
-    found = Signal(str, str)
+    found = Signal(str, str, dict)
+    page = Signal(str)
 
 
 def _stream_key(url: str) -> str:
@@ -78,20 +139,22 @@ def _stream_key(url: str) -> str:
 
 
 class LoginBrowser(QDialog):
-    """Retorna em `selected` uma lista de (url, título) e em `files` os arquivos baixados direto."""
+    """Retorna em `selected` uma lista de `Job` e em `files` os arquivos baixados direto."""
 
     def __init__(self, start_url: str, download_dir: Path, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Transcritor – Entrar e capturar vídeo")
         self.resize(1100, 780)
         self.download_dir = download_dir
-        self.selected: list[tuple[str, str]] = []
+        self.selected: list[Job] = []
         self.files: list[str] = []
-        self.streams: dict[str, tuple[str, str]] = {}   # chave -> (url, título)
+        self.streams: dict[str, Job] = {}                # chave -> vídeo detectado
+        self.page_url = ""                               # última página stream.aspx vista
         self._closed = False
 
         self.sink = Sink()
         self.sink.found.connect(self._on_found)
+        self.sink.page.connect(self._on_page)
         self.interceptor = Interceptor(self.sink)
 
         prof = profile()
@@ -101,7 +164,7 @@ class LoginBrowser(QDialog):
         self.view = QWebEngineView(self)
         self.page = QWebEnginePage(prof, self.view)
         self.view.setPage(self.page)
-        self.view.urlChanged.connect(lambda u: self.ed_url.setText(u.toString()))
+        self.view.urlChanged.connect(self._on_url)
 
         top = QHBoxLayout()
         back = QToolButton()
@@ -158,21 +221,59 @@ class LoginBrowser(QDialog):
         t = re.sub(r"\s*[-|–]\s*(Microsoft Stream|SharePoint|OneDrive|Microsoft Teams)\s*$", "", t)
         return t.strip() or "gravacao"
 
-    def _on_found(self, url: str, kind: str) -> None:
+    def _on_url(self, u: QUrl) -> None:
+        self.ed_url.setText(u.toString())
+        if SHAREPOINT_PAGE.match(u.toString()):
+            self._on_page(u.toString())
+
+    def _on_page(self, url: str) -> None:
+        self.page_url = url
+        if url in self.streams:
+            return
+        # No SharePoint dá para baixar sem dar play: o extrator usa a página e o login.
+        self._add(url, Job(url, page_url=url), "página")
+
+    def _on_found(self, url: str, kind: str, headers: dict) -> None:
         key = _stream_key(url)
-        is_new = key not in self.streams
-        self.streams[key] = (url, self._title())     # guarda a requisição mais recente (token novo)
-        if is_new:
-            self.cb.addItem(f"{self._title()} ({kind})", key)
-            self.cb.setCurrentIndex(self.cb.count() - 1)
-            self.btn_get.setEnabled(True)
-            self.tip.setText("<b>Vídeo detectado!</b> Clique em <b>Baixar vídeo</b>.")
+        job = Job(url, page_url=self.page_url, headers=headers)
+        if key in self.streams:
+            self.streams[key] = job                  # guarda a requisição mais recente (token novo)
+        else:
+            self._add(key, job, kind)
+
+    def _add(self, key: str, job: Job, kind: str) -> None:
+        self.streams[key] = job
+        self.cb.addItem(f"{self._title()} ({kind})", key)
+        self.cb.setCurrentIndex(self.cb.count() - 1)
+        self.btn_get.setEnabled(True)
+        self.tip.setText("<b>Vídeo detectado!</b> Clique em <b>Baixar vídeo</b>.")
 
     def _accept_selected(self) -> None:
         key = self.cb.currentData()
-        if key in self.streams:
-            self.selected = [self.streams[key]]
-            self._close(accept=True)
+        if key not in self.streams:
+            return
+        job = self.streams[key]
+        job.title = self._title()
+        job.cookies = export_cookies()
+        self.btn_get.setEnabled(False)
+        if SHAREPOINT_PAGE.match(self.view.url().toString()):
+            # Lê do próprio player o link do manifesto com o token vigente.
+            self.page.runJavaScript(
+                "(function(){try{return JSON.stringify(window.g_fileInfo||null)}catch(e){return null}})()",
+                0, lambda res: self._finish(job, res))
+        else:
+            self._finish(job, None)
+
+    def _finish(self, job: Job, file_info) -> None:
+        try:
+            info = json.loads(file_info) if file_info else None
+            if info and info.get(".transformUrl"):
+                job.candidates = [sharepoint_manifest(info)]
+                job.page_url = job.page_url or self.view.url().toString()
+        except Exception:
+            pass
+        self.selected = [job]
+        self._close(accept=True)
 
     def _on_download(self, item: QWebEngineDownloadRequest) -> None:
         # Botão "Baixar" do próprio site (quando o dono da gravação permite).

@@ -7,7 +7,9 @@ import re
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import urlparse
@@ -23,6 +25,31 @@ LOGIN_HOSTS = ("sharepoint.com", "teams.microsoft.com", "teams.live.com", "strea
 
 YTDLP_ZIPAPP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
 YTDLP_MAX_AGE = 7 * 24 * 3600
+
+
+@dataclass
+class Job:
+    """Um vídeo a baixar. Os campos extras vêm do navegador de login (Teams/SharePoint)."""
+    url: str
+    title: str = ""
+    page_url: str = ""                                   # página stream.aspx onde o vídeo foi aberto
+    headers: dict = field(default_factory=dict)          # cabeçalhos da requisição do manifesto
+    cookies: str = ""                                    # arquivo de cookies (formato Netscape)
+    candidates: list = field(default_factory=list)       # manifestos montados a partir da página
+
+
+SHAREPOINT_PAGE = re.compile(
+    r"https?://[\w-]+\.sharepoint\.com/(?::v:/|(?:[^?#]+/)?stream\.aspx\?)", re.I)
+
+
+def sharepoint_manifest(info: dict) -> str:
+    """Monta o link do manifesto a partir do `g_fileInfo` da página do SharePoint (como o yt-dlp)."""
+    parsed = urllib.parse.urlparse(info[".transformUrl"])
+    query = {**urllib.parse.parse_qs(parsed.query), "cTag": info.get(".ctag", ""),
+             "action": "Access", "part": "index", "format": "dash"}
+    return urllib.parse.urlunparse(parsed._replace(
+        path=urllib.parse.urljoin(f"{parsed.path}/", "../videomanifest"),
+        query=urllib.parse.urlencode(query, doseq=True)))
 
 
 def default_download_dir() -> Path:
@@ -128,7 +155,8 @@ class _Logger:
 
 
 def download_ytdlp(url: str, out_dir: Path, keep_video: bool, progress: ProgressFn,
-                   log: LogFn, cancel: threading.Event, title: str = "") -> list[str]:
+                   log: LogFn, cancel: threading.Event, title: str = "",
+                   headers: Optional[dict] = None, cookies: str = "") -> list[str]:
     yt_dlp = _load_ytdlp(log)
     log(f"yt-dlp {yt_dlp.version.__version__}")
     files: list[str] = []
@@ -182,6 +210,10 @@ def download_ytdlp(url: str, out_dir: Path, keep_video: bool, progress: Progress
         "fragment_retries": 10,
         "concurrent_fragment_downloads": 4,
     }
+    if headers:
+        opts["http_headers"] = headers
+    if cookies:
+        opts["cookiefile"] = cookies
     started = time.time() - 1
     with yt_dlp.YoutubeDL(opts) as ydl:
         try:
@@ -207,11 +239,60 @@ def _remove_partials(out_dir: Path, since: float) -> None:
             pass
 
 
-def download(url: str, out_dir: Path, keep_video: bool, progress: ProgressFn, log: LogFn,
+def _describe(url: str) -> str:
+    """Host e nomes dos parâmetros (sem valores, que contêm tokens) para o registro."""
+    p = urlparse(url)
+    names = [k for k, _ in urllib.parse.parse_qsl(p.query, keep_blank_values=True)]
+    return f"{p.hostname}{p.path} ?{','.join(names)}"
+
+
+def _auth_error(msg: str) -> bool:
+    return bool(re.search(r"HTTP Error (401|403)|Unsupported URL|login|Unable to download|"
+                          r"No video formats|Unable to extract", msg, re.I))
+
+
+def download(job: "Job | str", out_dir: Path, keep_video: bool, progress: ProgressFn, log: LogFn,
              cancel: threading.Event, title: str = "") -> list[str]:
+    if isinstance(job, str):
+        job = Job(job, title)
     out_dir.mkdir(parents=True, exist_ok=True)
-    if classify(url) == "manifest":
-        # Gravações do Teams/SharePoint: manifesto DASH com token temporário embutido no link.
-        return download_ytdlp(normalize_manifest(url), out_dir, keep_video, progress, log, cancel,
-                              title=title or "gravacao")
-    return download_ytdlp(url, out_dir, keep_video, progress, log, cancel)
+    kind = classify(job.url)
+    if kind != "manifest" and not job.page_url:
+        return download_ytdlp(job.url, out_dir, keep_video, progress, log, cancel,
+                              cookies=job.cookies)
+
+    # Gravações do Teams/SharePoint. O token muda de lugar conforme a versão do player,
+    # então tentamos, em ordem: manifesto montado da página, extrator do SharePoint com os
+    # cookies do login, o manifesto capturado como está e o manifesto cortado após format=dash.
+    name = job.title or "gravacao"
+    attempts: list[tuple[str, str, dict, str]] = []
+    for c in job.candidates:
+        attempts.append(("manifesto da página", c, {}, ""))
+    if job.page_url and SHAREPOINT_PAGE.match(job.page_url) and job.cookies:
+        attempts.append(("página do SharePoint com login", job.page_url, {}, job.cookies))
+    if kind == "manifest":
+        attempts.append(("manifesto capturado", job.url, job.headers, job.cookies))
+        short = normalize_manifest(job.url)
+        if short != job.url:
+            attempts.append(("manifesto curto", short, job.headers, job.cookies))
+    if not attempts:
+        attempts.append(("link", job.url, job.headers, job.cookies))
+
+    errors = []
+    for label, url, headers, cookies in attempts:
+        if cancel.is_set():
+            raise InterruptedError
+        log(f"Tentando {label}: {_describe(url)}" + (f" (+{len(headers)} cabeçalhos)" if headers else ""))
+        try:
+            return download_ytdlp(url, out_dir, keep_video, progress, log, cancel, title=name,
+                                  headers=headers, cookies=cookies)
+        except RuntimeError as e:
+            errors.append(f"{label}: {e}")
+            if not _auth_error(str(e)):
+                raise
+            log(f"Falhou ({label}). Tentando outra forma…")
+    raise RuntimeError(
+        "O Teams/SharePoint recusou o acesso ao vídeo (" + errors[-1].split(": ", 1)[-1][:160] + ").\n\n"
+        "Tente: abrir a gravação de novo no navegador do Transcritor, dar play e clicar em "
+        "\"Baixar vídeo\" logo em seguida. Se o dono bloqueou downloads, use \"Gravar reunião\" "
+        "enquanto o vídeo toca.")

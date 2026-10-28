@@ -9,16 +9,17 @@ import traceback
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QObject, QSettings, Qt, QThread, QUrl, Signal, Slot
-from PySide6.QtGui import QDesktopServices, QIcon
+from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSlider, QSpinBox,
-    QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
+    QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSlider, QSpinBox,
+    QSplitter, QSystemTrayIcon, QTableWidget, QTableWidgetItem, QTabWidget, QTextBrowser,
+    QVBoxLayout, QWidget,
 )
 
-from . import __version__, downloader, export, models
+from . import __version__, downloader, export, models, recorder
 from .engine import LANGUAGES, Engine, Options, Transcript, fmt_time, output_stem
 
 MEDIA_EXTS = {
@@ -118,20 +119,30 @@ class DownloadWorker(QObject):
     failed = Signal(str)
     finished = Signal()
 
-    def __init__(self, jobs: list[tuple[str, str]], out_dir: Path, keep_video: bool,
+    def __init__(self, jobs: list[downloader.Job], out_dir: Path, keep_video: bool,
                  cancel: threading.Event) -> None:
         super().__init__()
         self.jobs, self.out_dir, self.keep_video, self.cancel = jobs, out_dir, keep_video, cancel
 
     @Slot()
     def run(self) -> None:
-        for url, title in self.jobs:
+        try:
+            self._run()
+        finally:
+            # O arquivo de cookies tem a sessão do usuário: não deixa largado no disco.
+            for job in self.jobs:
+                if job.cookies:
+                    Path(job.cookies).unlink(missing_ok=True)
+            self.finished.emit()
+
+    def _run(self) -> None:
+        for job in self.jobs:
             if self.cancel.is_set():
                 break
-            self.log.emit(f"— Baixando {title or url}")
+            self.log.emit(f"— Baixando {job.title or job.url}")
             try:
-                paths = downloader.download(url, self.out_dir, self.keep_video,
-                                            self.progress.emit, self.log.emit, self.cancel, title)
+                paths = downloader.download(job, self.out_dir, self.keep_video,
+                                            self.progress.emit, self.log.emit, self.cancel)
                 for p in paths:
                     self.log.emit(f"Baixado: {p}")
                 self.downloaded.emit(paths)
@@ -140,7 +151,26 @@ class DownloadWorker(QObject):
             except Exception as e:
                 self.log.emit(traceback.format_exc())
                 self.failed.emit(str(e))
-        self.finished.emit()
+
+
+class RecordSignals(QObject):
+    """Ponte entre as threads de gravação (início/fim levam alguns segundos) e a interface."""
+    started = Signal()
+    failed = Signal(str)
+    stopped = Signal(str)
+    log = Signal(str)
+
+
+def _red_dot() -> QIcon:
+    pm = QPixmap(64, 64)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QColor("#e53935"))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawEllipse(8, 8, 48, 48)
+    p.end()
+    return QIcon(pm)
 
 
 def save_outputs(tr: Transcript, formats: list[str], out_dir: Optional[str]) -> list[Path]:
@@ -161,6 +191,18 @@ class MainWindow(QMainWindow):
         self.thread: Optional[QThread] = None
         self.worker: Optional[Worker] = None
         self.cancel = threading.Event()
+        self.rec: Optional[recorder.Recorder] = None
+        self.rec_busy = False             # iniciando ou finalizando
+        self.rec_t0 = 0.0
+        self.pending_start = False        # transcrever a gravação quando a tarefa atual acabar
+        self.rec_sig = RecordSignals()
+        self.rec_sig.started.connect(self.on_rec_started)
+        self.rec_sig.failed.connect(self.on_rec_failed)
+        self.rec_sig.stopped.connect(self.on_rec_stopped)
+        self.rec_sig.log.connect(self.append_log)
+        self.rec_timer = QTimer(self)
+        self.rec_timer.timeout.connect(self._rec_tick)
+        self.tray: Optional[QSystemTrayIcon] = None
         self.current_row = -1
         self.dl_new: list[str] = []
 
@@ -216,6 +258,38 @@ class MainWindow(QMainWindow):
         row.addWidget(self.ck_auto)
         dv.addLayout(row)
         lv.addWidget(dl)
+
+        rec = QGroupBox("Gravar reunião")
+        rv_ = QVBoxLayout(rec)
+        row = QHBoxLayout()
+        self.btn_rec = QPushButton("●  Gravar")
+        self.btn_rec.setMinimumWidth(170)
+        self.btn_rec.setToolTip("Grava a chamada enquanto ela acontece. Ao parar, a transcrição\n"
+                                "começa automaticamente com as configurações abaixo.")
+        self.btn_rec.clicked.connect(self.toggle_record)
+        self.lbl_rec = QLabel("")
+        self.cb_display = QComboBox()
+        self.cb_display.setToolTip("Tela a ser gravada")
+        for name in recorder.displays():
+            self.cb_display.addItem(name)
+        self.cb_display.setVisible(self.cb_display.count() > 1)
+        row.addWidget(self.btn_rec)
+        row.addWidget(self.lbl_rec)
+        row.addStretch(1)
+        row.addWidget(self.cb_display)
+        rv_.addLayout(row)
+        row = QHBoxLayout()
+        self.ck_rec_video = QCheckBox("Tela")
+        self.ck_rec_video.setToolTip("Grava também o vídeo da tela. Desmarcado: só áudio (arquivo bem menor).")
+        self.ck_rec_sys = QCheckBox("Som do computador")
+        self.ck_rec_sys.setToolTip("O que sai no seu alto-falante/fone: as vozes dos outros participantes.")
+        self.ck_rec_mic = QCheckBox("Microfone")
+        self.ck_rec_mic.setToolTip("A sua voz.")
+        for w in (self.ck_rec_video, self.ck_rec_sys, self.ck_rec_mic):
+            row.addWidget(w)
+        row.addStretch(1)
+        rv_.addLayout(row)
+        lv.addWidget(rec)
 
         box = QGroupBox("Configurações")
         form = QFormLayout(box)
@@ -375,6 +449,9 @@ class MainWindow(QMainWindow):
             c.setChecked(k in saved)
         self.ck_video.setChecked(s.value("keep_video", False, type=bool))
         self.ck_auto.setChecked(s.value("auto_transcribe", True, type=bool))
+        self.ck_rec_video.setChecked(s.value("rec_video", True, type=bool))
+        self.ck_rec_sys.setChecked(s.value("rec_system", True, type=bool))
+        self.ck_rec_mic.setChecked(s.value("rec_mic", True, type=bool))
         self._sync_enabled()
 
     def _save_settings(self) -> None:
@@ -388,6 +465,9 @@ class MainWindow(QMainWindow):
         s.setValue("formats", ",".join(self._formats()))
         s.setValue("keep_video", self.ck_video.isChecked())
         s.setValue("auto_transcribe", self.ck_auto.isChecked())
+        s.setValue("rec_video", self.ck_rec_video.isChecked())
+        s.setValue("rec_system", self.ck_rec_sys.isChecked())
+        s.setValue("rec_mic", self.ck_rec_mic.isChecked())
 
     @staticmethod
     def _set_combo(cb: QComboBox, data) -> None:
@@ -458,6 +538,8 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------- running
     def start(self) -> None:
+        if self.thread:
+            return
         jobs = [(i, f["path"]) for i, f in enumerate(self.files) if f["status"] != "done"]
         if not jobs:
             QMessageBox.information(self, "Transcritor",
@@ -511,7 +593,7 @@ class MainWindow(QMainWindow):
         if downloader.classify(url) == "login":
             self.open_login(url)
         else:
-            self.start_download([(url, "")])
+            self.start_download([downloader.Job(url)])
 
     def open_login(self, url: str = "") -> None:
         from .login_browser import LoginBrowser
@@ -528,7 +610,7 @@ class MainWindow(QMainWindow):
         elif dlg.files and self.ck_auto.isChecked():
             self.start()
 
-    def start_download(self, jobs: list[tuple[str, str]]) -> None:
+    def start_download(self, jobs: list[downloader.Job]) -> None:
         if self.thread:
             return
         self._save_settings()
@@ -578,10 +660,153 @@ class MainWindow(QMainWindow):
         self.bar.setValue(0)
         if self.cancel.is_set():
             self.status.setText("Download cancelado.")
+            self._start_pending()
             return
         n = len(self.dl_new)
         self.status.setText(f"{n} arquivo(s) baixado(s) em {self._download_dir()}." if n else "Nada foi baixado.")
         if n and self.ck_auto.isChecked():
+            self.start()
+        self._start_pending()
+
+    # ------------------------------------------------------------ gravação
+    def toggle_record(self) -> None:
+        if self.rec_busy:
+            return
+        if self.rec is None:
+            self.start_record()
+        else:
+            self.stop_record()
+
+    def start_record(self) -> None:
+        reason = recorder.unsupported()
+        if reason:
+            QMessageBox.warning(self, "Transcritor", reason)
+            return
+        video, system, mic = (self.ck_rec_video.isChecked(), self.ck_rec_sys.isChecked(),
+                              self.ck_rec_mic.isChecked())
+        if not (system or mic):
+            QMessageBox.information(self, "Transcritor",
+                                    "Marque \"Som do computador\" e/ou \"Microfone\" para gravar.")
+            return
+        self._save_settings()
+        dest = recorder.default_name(self._download_dir(), video)
+        rec = recorder.create()
+        display = max(self.cb_display.currentIndex(), 0)
+        self._set_rec_busy("Iniciando…")
+
+        def run() -> None:
+            try:
+                rec.start(dest, video, system, mic, display, self.rec_sig.log.emit)
+                self.rec = rec
+                self.rec_sig.started.emit()
+            except Exception as e:  # noqa: BLE001
+                self.rec_sig.log.emit(traceback.format_exc())
+                self.rec_sig.failed.emit(str(e))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def stop_record(self) -> None:
+        rec, self.rec = self.rec, None
+        self.rec_timer.stop()
+        self._set_rec_busy("Finalizando…")
+
+        def run() -> None:
+            try:
+                self.rec_sig.stopped.emit(str(rec.stop(self.rec_sig.log.emit)))
+            except Exception as e:  # noqa: BLE001
+                self.rec_sig.log.emit(traceback.format_exc())
+                self.rec_sig.failed.emit(str(e))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _set_rec_busy(self, text: str) -> None:
+        self.rec_busy = True
+        self.btn_rec.setEnabled(False)
+        self.btn_rec.setText(text)
+        for w in (self.ck_rec_video, self.ck_rec_sys, self.ck_rec_mic, self.cb_display):
+            w.setEnabled(False)
+
+    def _rec_idle(self) -> None:
+        self.rec_busy = False
+        self.btn_rec.setEnabled(True)
+        self.btn_rec.setText("●  Gravar")
+        self.btn_rec.setStyleSheet("")
+        self.lbl_rec.setText("")
+        self.setWindowTitle("Transcritor")
+        for w in (self.ck_rec_video, self.ck_rec_sys, self.ck_rec_mic, self.cb_display):
+            w.setEnabled(True)
+        if self.tray:
+            self.tray.hide()
+
+    @Slot()
+    def on_rec_started(self) -> None:
+        import time
+        self.rec_busy = False
+        self.rec_t0 = time.monotonic()
+        self.rec_warned = False
+        self.btn_rec.setEnabled(True)
+        self.btn_rec.setText("■  Parar e transcrever")
+        self.btn_rec.setStyleSheet("QPushButton { color: #c62828; font-weight: bold; }")
+        self.rec_timer.start(500)
+        self._rec_tick()
+        self.append_log("— Gravação iniciada.")
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            if self.tray is None:
+                self.tray = QSystemTrayIcon(_red_dot(), self)
+                menu = QMenu(self)
+                menu.addAction("Parar e transcrever", self.toggle_record)
+                menu.addAction("Mostrar o Transcritor", self._show_window)
+                self.tray.setContextMenu(menu)
+                self.tray.activated.connect(
+                    lambda r: self._show_window() if r == QSystemTrayIcon.ActivationReason.DoubleClick else None)
+            self.tray.show()
+
+    def _show_window(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _rec_tick(self) -> None:
+        import time
+        if self.rec is None:
+            return
+        err = self.rec.error()
+        if err:
+            self.append_log(f"A gravação foi interrompida: {err}")
+            self.stop_record()
+            return
+        t = int(time.monotonic() - self.rec_t0)
+        txt = f"{t // 3600:02d}:{t % 3600 // 60:02d}:{t % 60:02d}"
+        warn = ""
+        if self.rec.stalled():
+            warn = " <b style='color:#c62828'>⚠ sem dados: pare e grave de novo</b>"
+            if not self.rec_warned:
+                self.rec_warned = True
+                self.append_log("Aviso: a gravação parou de receber áudio/vídeo do sistema.")
+        self.lbl_rec.setText(f"<span style='color:#c62828'>●</span> {txt}{warn}")
+        self.setWindowTitle(f"● Gravando {txt} — Transcritor")
+        if self.tray:
+            self.tray.setToolTip(f"Transcritor: gravando ({txt})")
+
+    @Slot(str)
+    def on_rec_failed(self, msg: str) -> None:
+        self.rec = None
+        self.rec_timer.stop()
+        self._rec_idle()
+        self.append_log(f"Erro na gravação: {msg}")
+        QMessageBox.warning(self, "Transcritor", f"Problema na gravação:\n\n{msg}")
+
+    @Slot(str)
+    def on_rec_stopped(self, path: str) -> None:
+        self._rec_idle()
+        self.append_log(f"Gravação salva: {path}")
+        self.add_files([path])
+        self.list.setCurrentRow(len(self.files) - 1)
+        self._show_window()
+        if self.thread:
+            self.pending_start = True
+            self.status.setText("Gravação salva. Será transcrita quando a tarefa atual terminar.")
+        else:
             self.start()
 
     def _running(self, on: bool) -> None:
@@ -647,6 +872,12 @@ class MainWindow(QMainWindow):
         if self.cancel.is_set():
             msg = "Cancelado."
         self.status.setText(msg)
+        self._start_pending()
+
+    def _start_pending(self) -> None:
+        if self.pending_start and not self.thread:
+            self.pending_start = False
+            self.start()
 
     @Slot(str)
     def append_log(self, msg: str) -> None:
@@ -736,6 +967,18 @@ class MainWindow(QMainWindow):
             self.status.setText("Texto copiado para a área de transferência.")
 
     def closeEvent(self, e) -> None:
+        if self.rec is not None or self.rec_busy:
+            if QMessageBox.question(self, "Transcritor",
+                                    "Uma gravação está em andamento. Parar, salvar o arquivo e sair?") \
+                    != QMessageBox.StandardButton.Yes:
+                e.ignore()
+                return
+            if self.rec is not None:
+                try:
+                    self.rec.stop(self.append_log)
+                except Exception as ex:  # noqa: BLE001
+                    self.append_log(f"Erro ao finalizar a gravação: {ex}")
+                self.rec = None
         if self.thread:
             if QMessageBox.question(self, "Transcritor",
                                     "Uma tarefa está em andamento. Deseja cancelar e sair?") \
