@@ -45,7 +45,7 @@ exe = EXE(
     console=False,
     icon=icon,
     upx=False,
-    target_arch=None,
+    target_arch="arm64" if sys.platform == "darwin" else None,
 )
 coll = COLLECT(exe, a.binaries, a.datas, name="Transcritor", upx=False)
 
@@ -63,6 +63,9 @@ if sys.platform == "darwin":
             "CFBundleVersion": __version__,
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "11.0",
+            # Apenas Apple Silicon: nunca abrir via Rosetta.
+            "LSRequiresNativeExecution": True,
+            "LSArchitecturePriority": ["arm64"],
             "NSHumanReadableCopyright": "Software livre. Modelos: OpenAI Whisper (MIT), pyannote (MIT), WeSpeaker (Apache 2.0).",
         },
     )

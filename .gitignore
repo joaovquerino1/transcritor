@@ -8,3 +8,4 @@ __pycache__/
 .venv-x64/
 build-x64/
 dist-x64/
+dist-build/

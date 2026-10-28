@@ -3,7 +3,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 VERSION=$(python3 -c "import re;print(re.search(r'\"(.+)\"', open('src/transcritor/__init__.py').read())[1])")
-ARCH=${ARCH:-$(uname -m)}
+ARCH=arm64
+[ "$(uname -m)" = arm64 ] || { echo "Gere o app num Mac com Apple Silicon"; exit 1; }
 APP=${APP_DIR:-dist}/Transcritor.app
 DMG=dist/Transcritor-${VERSION}-macOS-${ARCH}.dmg
 [ -d "$APP" ] || { echo "Rode o PyInstaller primeiro"; exit 1; }

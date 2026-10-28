@@ -1,6 +1,6 @@
 # Transcritor
 
-Transcreve vídeos e áudios em qualquer formato, identifica quem está falando e salva o resultado em TXT, Word, SRT, VTT ou JSON. Roda no Windows e no macOS, **100% local e gratuito**: nenhum arquivo sai do seu computador e não há chave de API.
+Transcreve vídeos e áudios em qualquer formato, identifica quem está falando e salva o resultado em TXT, Word, SRT, VTT ou JSON. Roda no Windows (x64) e no macOS com Apple Silicon (M1 ou mais novo), **100% local e gratuito**: nenhum arquivo sai do seu computador e não há chave de API.
 
 Otimizado para **português do Brasil** e **inglês** (também tem detecção automática e um modo misto para vídeos que alternam entre os dois).
 
@@ -32,12 +32,12 @@ Desempenho: em CPU, o modo recomendado leva cerca de metade da duração do víd
 
 ## Instalação
 
-- **macOS**: abra `Transcritor-<versão>-macOS-<arch>.dmg` e arraste o Transcritor para Aplicativos. Como o app não é assinado com um Developer ID da Apple, na primeira vez clique com o botão direito no app → **Abrir** → **Abrir** (ou em Ajustes do Sistema → Privacidade e Segurança → **Abrir Mesmo Assim**).
+- **macOS (Apple Silicon)**: abra `Transcritor-<versão>-macOS-arm64.dmg` e arraste o Transcritor para Aplicativos. Como o app não é assinado com um Developer ID da Apple, na primeira vez clique com o botão direito no app → **Abrir** → **Abrir** (ou em Ajustes do Sistema → Privacidade e Segurança → **Abrir Mesmo Assim**).
 - **Windows**: execute `Transcritor-<versão>-Windows-x64-Setup.exe`. O SmartScreen pode avisar que o app é desconhecido: clique em **Mais informações** → **Executar assim mesmo**.
 
 ## Gerar os instaladores
 
-Cada instalador precisa ser gerado no próprio sistema. O jeito mais fácil é o GitHub Actions: suba o repositório e crie uma tag (`git tag v1.0.0 && git push --tags`). O workflow [`.github/workflows/build.yml`](.github/workflows/build.yml) gera o `.exe` do Windows e os `.dmg` do macOS (Apple Silicon e Intel) e publica tudo numa Release.
+Cada instalador precisa ser gerado no próprio sistema. O jeito mais fácil é o GitHub Actions: suba o repositório e crie uma tag (`git tag v1.0.0 && git push --tags`). O workflow [`.github/workflows/build.yml`](.github/workflows/build.yml) gera o `.exe` do Windows e o `.dmg` do macOS para Apple Silicon e publica tudo numa Release.
 
 Manualmente (Python 3.10 a 3.13):
 
