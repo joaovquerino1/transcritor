@@ -28,9 +28,9 @@ hiddenimports += ["brotli", "certifi", "mutagen", "Cryptodome", "websockets", "r
 # Gravação de reuniões: ScreenCaptureKit (macOS) e loopback WASAPI (Windows)
 if sys.platform == "darwin":
     hiddenimports += ["objc", "Foundation", "AppKit", "Quartz", "CoreMedia", "AVFoundation",
-                      "ScreenCaptureKit"]
+                      "ScreenCaptureKit", "dispatch"]
 elif sys.platform == "win32":
-    hiddenimports += ["soundcard", "soundcard.mediafoundation", "cffi"]
+    hiddenimports += ["soundcard", "soundcard.mediafoundation", "cffi"] + collect_submodules("mss")
 
 excludes = [
     "tkinter", "matplotlib", "PIL", "IPython", "pytest", "scipy", "pandas", "torch",

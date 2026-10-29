@@ -1,8 +1,12 @@
 """Gravação de reuniões: tela + som do computador (os outros participantes) + microfone.
 
 macOS (15 ou mais novo): ScreenCaptureKit grava tudo direto num MP4.
-Windows: áudio do sistema por loopback WASAPI e microfone (biblioteca soundcard), tela pelo
-FFmpeg (gdigrab). No fim, as faixas de áudio são misturadas numa só, pronta para transcrever.
+Windows: áudio do sistema por loopback WASAPI e microfone (biblioteca soundcard); a tela
+escolhida é capturada com o mss e codificada pelo FFmpeg. No fim, as faixas de áudio são
+misturadas numa só, pronta para transcrever.
+
+Durante a gravação, `on_audio(fonte, amostras, taxa)` recebe o áudio de cada fonte
+("system" ou "mic") separadamente: é o que alimenta a transcrição ao vivo e os medidores.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from typing import Callable, Optional
 from .downloader import ffmpeg_exe, unique_path
 
 LogFn = Callable[[str], None]
+AudioFn = Callable[[str, "object", int], None]   # (fonte, np.ndarray float32 mono, taxa)
 MAX_WIDTH = 1920
 FPS = 15
 
@@ -74,8 +79,11 @@ def finalize(inputs: list[Path], dest: Path, log: LogFn) -> Path:
 class Recorder:
     """Interface comum. `start` e `stop` podem levar alguns segundos: chame fora da thread da UI."""
 
+    def __init__(self) -> None:
+        self._warnings: list[str] = []
+
     def start(self, dest: Path, video: bool, system_audio: bool, mic: bool, display: int,
-              log: LogFn) -> None:
+              log: LogFn, mic_device: str = "", on_audio: Optional[AudioFn] = None) -> None:
         raise NotImplementedError
 
     def stop(self, log: LogFn) -> Path:
@@ -84,6 +92,10 @@ class Recorder:
     def error(self) -> Optional[str]:
         """Erro ocorrido durante a gravação (ex.: permissão revogada)."""
         return None
+
+    def warnings(self) -> list[str]:
+        """Problemas que não param a gravação (ex.: o microfone foi bloqueado)."""
+        return list(self._warnings)
 
     def stalled(self) -> bool:
         """A gravação parece não estar recebendo dados."""
@@ -120,12 +132,48 @@ def _delegate_classes():
             def recordingOutputDidFinishRecording_(self, out):
                 self.owner._finished.set()
 
-        _classes = (TranscritorStreamDelegate, TranscritorRecordingDelegate)
+        import objc
+
+        class TranscritorAudioOutput(NSObject, protocols=[objc.protocolNamed("SCStreamOutput")]):
+            def stream_didOutputSampleBuffer_ofType_(self, stream, sbuf, kind):
+                try:
+                    samples, rate = _mac_samples(sbuf)
+                    if samples is not None and len(samples):
+                        self.owner._on_audio("mic" if int(kind) == 2 else "system", samples, rate)
+                except Exception:  # noqa: BLE001  (nunca derrubar a thread do ScreenCaptureKit)
+                    pass
+
+        _classes = (TranscritorStreamDelegate, TranscritorRecordingDelegate, TranscritorAudioOutput)
     return _classes
+
+
+def _mac_samples(sbuf):
+    """CMSampleBuffer de áudio do ScreenCaptureKit -> (np.float32 mono, taxa)."""
+    import CoreMedia as CM
+    import numpy as np
+
+    n = int(CM.CMSampleBufferGetNumSamples(sbuf))
+    asbd = CM.CMAudioFormatDescriptionGetStreamBasicDescription(CM.CMSampleBufferGetFormatDescription(sbuf))
+    rate, flags, channels, bits = float(asbd[0]), int(asbd[2]), int(asbd[6]), int(asbd[7])
+    block = CM.CMSampleBufferGetDataBuffer(sbuf)
+    if block is None or n == 0 or bits != 32 or not flags & 1:      # só float32
+        return None, 0
+    size = CM.CMBlockBufferGetDataLength(block)
+    status, data = CM.CMBlockBufferCopyDataBytes(block, 0, size, None)
+    if status != 0 or not data:
+        return None, 0
+    arr = np.frombuffer(bytes(data), dtype=np.float32)
+    if channels > 1:
+        if flags & 0x20:      # kAudioFormatFlagIsNonInterleaved: canais um depois do outro
+            arr = arr[:n * channels].reshape(channels, n).mean(axis=0)
+        else:
+            arr = arr[:n * channels].reshape(n, channels).mean(axis=1)
+    return arr[:n].astype(np.float32, copy=False), int(rate)
 
 
 class MacRecorder(Recorder):
     def __init__(self) -> None:
+        super().__init__()
         self._stream = None
         self._output = None
         self._delegates = []
@@ -190,16 +238,27 @@ class MacRecorder(Recorder):
             AVF.AVCaptureDevice.requestAccessForMediaType_completionHandler_(AVF.AVMediaTypeAudio, handler)
             done.wait(120)
             return box.get("ok", False)
-        log("Aviso: sem permissão para o microfone (Ajustes do Sistema > Privacidade e Segurança > "
-            "Microfone). Gravando sem a sua voz.")
+        msg = ("O macOS bloqueou o microfone, então a sua voz não está sendo gravada. Ative o "
+               "Transcritor em Ajustes do Sistema > Privacidade e Segurança > Microfone.")
+        log("Aviso: " + msg)
+        self._warnings.append(msg)
         return False
 
-    def start(self, dest, video, system_audio, mic, display, log) -> None:
+    @staticmethod
+    def mic_devices() -> list[tuple[str, str]]:
+        try:
+            import AVFoundation as AVF
+            devs = AVF.AVCaptureDevice.devicesWithMediaType_(AVF.AVMediaTypeAudio) or []
+            return [(str(d.uniqueID()), str(d.localizedName())) for d in devs]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def start(self, dest, video, system_audio, mic, display, log, mic_device="", on_audio=None) -> None:
         import objc
         with objc.autorelease_pool():      # roda numa thread comum, sem pool do Cocoa
-            self._start(dest, video, system_audio, mic, display, log)
+            self._start(dest, video, system_audio, mic, display, log, mic_device, on_audio)
 
-    def _start(self, dest, video, system_audio, mic, display, log) -> None:
+    def _start(self, dest, video, system_audio, mic, display, log, mic_device, on_audio) -> None:
         import ScreenCaptureKit as SCK
         from CoreMedia import CMTimeMake
         from Foundation import NSURL
@@ -237,6 +296,8 @@ class MacRecorder(Recorder):
         cfg.setChannelCount_(2)
         if mic:
             cfg.setCaptureMicrophone_(True)
+            if mic_device:
+                cfg.setMicrophoneCaptureDeviceID_(mic_device)
 
         self.dest, self.video = dest, video
         self.raw = dest.with_name(f".{dest.stem}.gravando.mp4")
@@ -245,7 +306,7 @@ class MacRecorder(Recorder):
         rcfg.setOutputFileType_("public.mpeg-4")
         rcfg.setVideoCodecType_("avc1")
 
-        StreamDelegate, RecDelegate = _delegate_classes()
+        StreamDelegate, RecDelegate, _ = _delegate_classes()
         sd, rd = StreamDelegate.alloc().init(), RecDelegate.alloc().init()
         sd.owner = rd.owner = self
         self._delegates = [sd, rd]
@@ -254,6 +315,19 @@ class MacRecorder(Recorder):
         ok, err = stream.addRecordingOutput_error_(output, None)
         if not ok:
             raise RuntimeError(f"Não foi possível preparar a gravação: {err}")
+        if on_audio:
+            import dispatch
+            self._on_audio = on_audio
+            ad = _delegate_classes()[2].alloc().init()
+            ad.owner = self
+            self._delegates.append(ad)
+            self._queue = dispatch.dispatch_queue_create(b"br.com.transcritor.audio", None)
+            kinds = ([SCK.SCStreamOutputTypeAudio] if system_audio else []) + \
+                    ([SCK.SCStreamOutputTypeMicrophone] if mic else [])
+            for kind in kinds:
+                ok, err = stream.addStreamOutput_type_sampleHandlerQueue_error_(ad, kind, self._queue, None)
+                if not ok:
+                    log(f"Aviso: sem áudio para a transcrição ao vivo ({err}).")
 
         box: dict = {}
         done = threading.Event()
@@ -315,35 +389,126 @@ class MacRecorder(Recorder):
 # =================================================================== Windows
 _sc_lock = threading.Lock()
 
+
+def _soundcard():
+    """Importa o soundcard e prepara o COM nesta thread.
+
+    O soundcard inicializa o COM ao ser importado e trata "já inicializado" como erro:
+    importa primeiro (uma thread por vez) e só depois garante o COM nesta thread.
+    """
+    import ctypes
+    with _sc_lock:
+        import soundcard as sc
+    ctypes.windll.ole32.CoInitializeEx(None, 0)
+    return sc
+
+
+def _in_thread(fn, timeout: float = 15):
+    """Roda fn numa thread própria (o COM do soundcard não pode tocar a thread da interface)."""
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["v"] = fn()
+        except Exception as e:  # noqa: BLE001
+            box["e"] = e
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(timeout)
+    if "e" in box:
+        raise box["e"]
+    return box.get("v")
+
+
+def _win_monitors() -> list[dict]:
+    """Monitores em pixels físicos, o principal primeiro."""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    try:   # coordenadas reais mesmo com escala de 125%/150% (na interface o Qt já faz isso)
+        user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    except Exception:  # noqa: BLE001
+        pass
+
+    class MONITORINFOEXW(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT), ("rcWork", wintypes.RECT),
+                    ("dwFlags", wintypes.DWORD), ("szDevice", wintypes.WCHAR * 32)]
+
+    class DISPLAY_DEVICEW(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("DeviceName", wintypes.WCHAR * 32),
+                    ("DeviceString", wintypes.WCHAR * 128), ("StateFlags", wintypes.DWORD),
+                    ("DeviceID", wintypes.WCHAR * 128), ("DeviceKey", wintypes.WCHAR * 128)]
+
+    mons: list[dict] = []
+    proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC,
+                               ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+
+    def cb(hmon, hdc, rect, lparam):
+        mi = MONITORINFOEXW()
+        mi.cbSize = ctypes.sizeof(mi)
+        if user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+            dd = DISPLAY_DEVICEW()
+            dd.cb = ctypes.sizeof(dd)
+            name = dd.DeviceString if user32.EnumDisplayDevicesW(mi.szDevice, 0, ctypes.byref(dd), 0) else ""
+            r = mi.rcMonitor
+            mons.append({"left": r.left, "top": r.top, "width": r.right - r.left,
+                         "height": r.bottom - r.top, "primary": bool(mi.dwFlags & 1), "name": name})
+        return True
+
+    user32.EnumDisplayMonitors(None, None, proto(cb), 0)
+    mons.sort(key=lambda m: (not m["primary"], m["left"], m["top"]))
+    return mons
+
+
 class WinRecorder(Recorder):
     def __init__(self) -> None:
+        super().__init__()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._errors: list[str] = []
         self._ff: Optional[subprocess.Popen] = None
+        self._video_err: Optional[str] = None
         self.parts: list[Path] = []
         self.video_part: Optional[Path] = None
         self.dest: Optional[Path] = None
 
     @staticmethod
     def displays() -> list[str]:
-        return ["Todas as telas"]
+        try:
+            mons = _win_monitors()
+        except Exception:  # noqa: BLE001
+            mons = []
+        names = []
+        for i, m in enumerate(mons):
+            label = f"Tela {i + 1}: {m['width']}×{m['height']}"
+            extra = [x for x in (m["name"] if "generic" not in m["name"].lower() else "",
+                                 "principal" if m["primary"] else "") if x]
+            names.append(label + (f" ({', '.join(extra)})" if extra else ""))
+        if len(mons) > 1:
+            names.append("Todas as telas")
+        return names or ["Tela principal"]
 
-    def _capture(self, kind: str, path: Path, t0: float) -> None:
+    @staticmethod
+    def mic_devices() -> list[tuple[str, str]]:
+        def find():
+            sc = _soundcard()
+            return [(str(m.id), str(m.name)) for m in sc.all_microphones(include_loopback=False)]
+        try:
+            return _in_thread(find) or []
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _capture(self, kind: str, path: Path, t0: float, device: str, on_audio) -> None:
         """Grava um dispositivo de áudio num WAV mono 48 kHz, preenchendo silêncios pelo relógio."""
-        import ctypes
-
         import numpy as np
         try:
-            # O soundcard inicializa o COM ao ser importado e trata "já inicializado" como erro:
-            # importa primeiro (uma thread por vez) e só depois garante o COM nesta thread.
-            with _sc_lock:
-                import soundcard as sc
-            ctypes.windll.ole32.CoInitializeEx(None, 0)
+            sc = _soundcard()
             if kind == "system":
                 dev = sc.get_microphone(id=str(sc.default_speaker().name), include_loopback=True)
             else:
-                dev = sc.default_microphone()
+                dev = sc.get_microphone(id=device) if device else sc.default_microphone()
             sr = 48000
             with wave.open(str(path), "wb") as w:
                 w.setnchannels(1)
@@ -363,11 +528,68 @@ class WinRecorder(Recorder):
                         pcm = (np.clip(data, -1, 1) * 32767).astype(np.int16)
                         w.writeframes(pcm.tobytes())
                         written += len(pcm)
+                        if on_audio and len(data):
+                            on_audio(kind, data, sr)
         except Exception as e:  # noqa: BLE001
-            name = "som do computador" if kind == "system" else "microfone"
-            self._errors.append(f"{name}: {e}")
+            if kind == "system":
+                self._errors.append(f"som do computador: {e}")
+                self._warnings.append(f"O som do computador não está sendo gravado ({e}).")
+            else:
+                self._errors.append(f"microfone: {e}")
+                self._warnings.append(_mic_problem(str(e)))
 
-    def start(self, dest, video, system_audio, mic, display, log) -> None:
+    def _grab_screen(self, display: int, t0: float) -> None:
+        """Captura a tela escolhida e entrega os quadros ao FFmpeg num ritmo fixo de FPS."""
+        import numpy as np
+        try:
+            import mss
+            factory = getattr(mss, "MSS", None) or mss.mss
+            mons = _win_monitors()
+            if display < len(mons):
+                m = mons[display]
+                box = {"left": m["left"], "top": m["top"], "width": m["width"], "height": m["height"]}
+            else:
+                box = None
+            with factory() as grabber:
+                box = box or grabber.monitors[0]
+                step = -(-box["width"] // MAX_WIDTH)        # reduz telas 4K por um fator inteiro
+                w, h = box["width"] // step, box["height"] // step
+                w, h = w - w % 2, h - h % 2
+                cmd = [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y",
+                       "-f", "rawvideo", "-pix_fmt", "bgra", "-video_size", f"{w}x{h}",
+                       "-framerate", str(FPS), "-i", "-",
+                       "-vf", "format=yuv420p", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                       "-g", str(FPS * 4), str(self.video_part)]
+                self._ff = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.PIPE, **_popen_flags())
+                sent = 0
+                frame = b""
+                while not self._stop.is_set():
+                    shot = grabber.grab(box)
+                    img = np.frombuffer(shot.bgra, dtype=np.uint8).reshape(shot.height, shot.width, 4)
+                    frame = np.ascontiguousarray(img[::step, ::step][:h, :w]).tobytes()
+                    # Repete o quadro se a captura atrasar: o vídeo fica sempre alinhado com o áudio.
+                    due = int((time.monotonic() - t0) * FPS) + 1
+                    while sent < due:
+                        self._ff.stdin.write(frame)
+                        sent += 1
+                    pause = t0 + sent / FPS - time.monotonic()
+                    if pause > 0:
+                        time.sleep(pause)
+                due = int((time.monotonic() - t0) * FPS)
+                while frame and sent < due:
+                    self._ff.stdin.write(frame)
+                    sent += 1
+        except Exception as e:  # noqa: BLE001
+            self._video_err = str(e)
+        finally:
+            if self._ff and self._ff.stdin:
+                try:
+                    self._ff.stdin.close()
+                except OSError:
+                    pass
+
+    def start(self, dest, video, system_audio, mic, display, log, mic_device="", on_audio=None) -> None:
         self.dest = dest
         self._stop.clear()
         tmp = dest.with_name(f".{dest.stem}.gravando")
@@ -375,23 +597,20 @@ class WinRecorder(Recorder):
         t0 = time.monotonic()
         if video:
             self.video_part = tmp / "tela.mkv"
-            vf = f"scale='min({MAX_WIDTH},iw)':-2,format=yuv420p"
-            cmd = [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y",
-                   "-f", "gdigrab", "-framerate", str(FPS), "-draw_mouse", "1", "-i", "desktop",
-                   "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-                   "-g", str(FPS * 4), str(self.video_part)]
-            self._ff = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.PIPE, **_popen_flags())
+            t = threading.Thread(target=self._grab_screen, args=(display, t0), daemon=True)
+            t.start()
+            self._video_thread = t
         for kind, on in (("system", system_audio), ("mic", mic)):
             if on:
                 p = tmp / f"{kind}.wav"
                 self.parts.append(p)
-                t = threading.Thread(target=self._capture, args=(kind, p, t0), daemon=True)
+                t = threading.Thread(target=self._capture, args=(kind, p, t0, mic_device, on_audio),
+                                     daemon=True)
                 t.start()
                 self._threads.append(t)
-        time.sleep(1.0)
-        if self._ff and self._ff.poll() is not None:
-            err = self._ff.stderr.read().decode(errors="replace")
+        time.sleep(1.5)
+        if video and (self._video_err or (self._ff and self._ff.poll() is not None)):
+            err = self._video_err or self._ff.stderr.read().decode(errors="replace")
             self._stop.set()
             raise RuntimeError(f"Não foi possível gravar a tela: {err.strip()[-300:]}")
         if self.parts and len(self._errors) == len(self.parts) and not video:
@@ -399,6 +618,8 @@ class WinRecorder(Recorder):
             raise RuntimeError("Não foi possível gravar o áudio: " + "; ".join(self._errors))
 
     def error(self) -> Optional[str]:
+        if self._video_err:
+            return f"a gravação da tela parou: {self._video_err}"
         if self._ff and self._ff.poll() not in (None, 0):
             return "a gravação da tela parou inesperadamente"
         return None
@@ -407,9 +628,11 @@ class WinRecorder(Recorder):
         self._stop.set()
         for t in self._threads:
             t.join(10)
+        if self.video_part:
+            self._video_thread.join(10)
         if self._ff:
             try:
-                self._ff.communicate(b"q", timeout=30)
+                self._ff.communicate(timeout=60)
             except subprocess.TimeoutExpired:
                 self._ff.kill()
         for e in self._errors:
@@ -427,6 +650,15 @@ class WinRecorder(Recorder):
                 tmp.rmdir()
             except OSError:
                 pass
+
+
+def _mic_problem(err: str) -> str:
+    if "0x80070005" in err or "denied" in err.lower():
+        return ("O Windows bloqueou o microfone para o Transcritor, então a sua voz não está sendo "
+                "gravada. Ative “Permitir que aplicativos da área de trabalho acessem o "
+                "microfone” em Configurações > Privacidade > Microfone. Se a opção estiver "
+                "travada, ela é controlada pela TI da empresa.")
+    return f"O microfone não está sendo gravado ({err}). Escolha outro em Microfone."
 
 
 # ===================================================================== geral
@@ -458,3 +690,12 @@ def create() -> Recorder:
 
 def displays() -> list[str]:
     return MacRecorder.displays() if sys.platform == "darwin" else WinRecorder.displays()
+
+
+def mic_devices() -> list[tuple[str, str]]:
+    """Microfones disponíveis como (id, nome). Pode levar um instante: chame fora da interface."""
+    if sys.platform == "darwin":
+        return MacRecorder.mic_devices()
+    if sys.platform == "win32":
+        return WinRecorder.mic_devices()
+    return []

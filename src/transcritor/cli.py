@@ -19,6 +19,10 @@ def main(argv: list[str]) -> int:
                          "(0 = até apertar Enter)")
     ap.add_argument("--sem-tela", action="store_true", help="na gravação, só áudio")
     ap.add_argument("--sem-microfone", action="store_true", help="na gravação, sem o microfone")
+    ap.add_argument("--tela", type=int, default=1, help="na gravação, número da tela (veja --dispositivos)")
+    ap.add_argument("--microfone", default="", help="na gravação, id do microfone (veja --dispositivos)")
+    ap.add_argument("--ao-vivo", action="store_true", help="na gravação, mostra a transcrição enquanto grava")
+    ap.add_argument("--dispositivos", action="store_true", help="lista telas e microfones e sai")
     ap.add_argument("--manter-video", action="store_true", help="ao baixar links, manter o vídeo")
     ap.add_argument("--idioma", choices=list(LANGUAGES), default="pt")
     ap.add_argument("--modelo", choices=[m.key for m in models.WHISPER_MODELS], default="large-v3-turbo")
@@ -28,6 +32,15 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--formatos", default="txt,docx,srt", help=",".join(export.FORMATS))
     ap.add_argument("--saida", help="pasta de saída (padrão: a do vídeo)")
     args = ap.parse_args(argv)
+    if args.dispositivos:
+        from . import recorder
+        print("Telas:")
+        for i, name in enumerate(recorder.displays(), 1):
+            print(f"  {i}. {name}")
+        print("Microfones:")
+        for dev_id, name in recorder.mic_devices():
+            print(f"  {name}\n     id: {dev_id}")
+        return 0
     if not args.arquivos and args.gravar is None:
         ap.error("informe arquivos, links ou --gravar")
 
@@ -94,7 +107,21 @@ def _record(args) -> Path:
     dest = recorder.default_name(out, not args.sem_tela)
     rec = recorder.create()
     log = lambda m: print(f"  {m}", flush=True)  # noqa: E731
-    rec.start(dest, not args.sem_tela, True, not args.sem_microfone, 0, log)
+    live = None
+    if args.ao_vivo:
+        from .engine import fmt_time
+        from .live import SOURCE_NAMES, LiveTranscriber
+
+        def show(seg) -> None:
+            print(f"  [ao vivo {fmt_time(seg.start)}] {SOURCE_NAMES[seg.source]}: {seg.text}", flush=True)
+
+        live = LiveTranscriber(args.idioma, args.vocabulario, show,
+                               lambda m: m and print(f"  {m}", flush=True), log)
+        live.start()
+    rec.start(dest, not args.sem_tela, True, not args.sem_microfone, max(args.tela - 1, 0), log,
+              mic_device=args.microfone, on_audio=live.feed if live else None)
+    for w in rec.warnings():
+        print(f"  Aviso: {w}", flush=True)
     print(f"== Gravando em {dest}" + (" (Enter para parar)" if not args.gravar else ""), flush=True)
     try:
         if args.gravar:
@@ -103,6 +130,9 @@ def _record(args) -> Path:
             input()
     except KeyboardInterrupt:
         pass
+    if live:
+        live.stop()
+        live._thread.join(60)
     path = rec.stop(log)
     print(f"  Gravado: {path}", flush=True)
     return path

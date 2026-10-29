@@ -46,12 +46,15 @@ Dicas:
 
 Para transcrever uma chamada (Teams, Zoom, Meet, WhatsApp…) enquanto ela acontece:
 
-1. Em **Gravar reunião**, escolha o que gravar: **Tela**, **Som do computador** (as vozes dos outros participantes) e **Microfone** (a sua voz).
-2. Clique em **● Gravar**. Um ícone vermelho aparece na barra de menus (macOS) ou na bandeja (Windows), com a opção **Parar e transcrever**.
-3. Ao terminar, clique em **■ Parar e transcrever**. O arquivo `Reunião AAAA-MM-DD HHhMM.mp4` (ou `.m4a`, sem a tela) é salvo e a transcrição começa sozinha com as configurações atuais.
+1. Em **Gravar reunião**, escolha o que gravar: **Tela** (e qual delas, se você usa mais de um monitor), **Som do computador** (as vozes dos outros participantes) e **Microfone** (a sua voz; escolha o mesmo microfone que você usa na chamada).
+2. Clique em **Gravar**. Um ícone vermelho aparece na barra de menus (macOS) ou na bandeja (Windows), com a opção **Parar e transcrever**. As barrinhas ao lado de cada fonte mostram o volume que está chegando: se a do microfone ficar parada, o app avisa.
+3. Com **Transcrever ao vivo** marcado, o texto aparece enquanto vocês falam, separado em **Você** (microfone) e **Participantes** (som do computador). Sem fone, o microfone também capta o alto-falante; esse eco é reconhecido e descartado.
+4. Ao terminar, clique em **Parar e transcrever**. O arquivo `Reunião AAAA-MM-DD HHhMM.mp4` (ou `.m4a`, sem a tela) é salvo, junto com o texto ao vivo em `Reunião … (ao vivo).txt`, e a transcrição completa, com cada participante identificado, começa sozinha.
+
+A transcrição ao vivo usa o modelo Whisper small (rápido o bastante para acompanhar a conversa num processador comum). A versão final usa o modelo escolhido em **Modelo**.
 
 - **macOS**: precisa do macOS 15 ou mais novo. Na primeira vez, autorize em Ajustes do Sistema > Privacidade e Segurança > **Gravação de Tela e Áudio do Sistema** e **Microfone**. Como o app não é assinado pela Apple, pode ser preciso autorizar de novo depois de cada atualização.
-- **Windows**: grava o áudio do alto-falante/fone padrão e o microfone padrão. A tela inclui todos os monitores.
+- **Windows**: grava o áudio do alto-falante ou fone padrão. Se a sua voz não aparecer, confira em Configurações > Privacidade > Microfone se **Permitir que aplicativos da área de trabalho acessem o microfone** está ativado (o Teams novo usa outra permissão, então ele pode funcionar mesmo com essa desligada).
 - Avise os participantes antes de gravar e siga as regras da sua empresa e a legislação aplicável.
 
 ## Modelos usados (todos gratuitos e abertos)
@@ -97,9 +100,11 @@ Para rodar a partir do código: `python run.py`.
 Transcritor --cli entrevista.mp4 --idioma pt --falantes 2 --formatos txt,docx,srt
 Transcritor --cli "https://www.youtube.com/watch?v=..." --idioma auto
 Transcritor --cli --gravar 0          # grava a reunião até apertar Enter e transcreve
+Transcritor --cli --dispositivos      # lista telas e microfones
+Transcritor --cli --gravar 0 --tela 2 --ao-vivo
 ```
 
-No macOS o executável fica em `/Applications/Transcritor.app/Contents/MacOS/Transcritor`. Opções: `--idioma pt|en|auto|mixed`, `--modelo large-v3-turbo|large-v3|medium|small`, `--falantes N`, `--sem-falantes`, `--vocabulario "..."`, `--saida pasta`, `--gravar SEGUNDOS`, `--sem-tela`, `--sem-microfone`.
+No macOS o executável fica em `/Applications/Transcritor.app/Contents/MacOS/Transcritor`. Opções: `--idioma pt|en|auto|mixed`, `--modelo large-v3-turbo|large-v3|medium|small`, `--falantes N`, `--sem-falantes`, `--vocabulario "..."`, `--saida pasta`, `--gravar SEGUNDOS`, `--sem-tela`, `--sem-microfone`, `--tela N`, `--microfone ID`, `--ao-vivo`, `--dispositivos`.
 
 ## Estrutura
 
@@ -108,6 +113,8 @@ No macOS o executável fica em `/Applications/Transcritor.app/Contents/MacOS/Tra
 - `src/transcritor/downloader.py`: download de vídeos (yt-dlp + FFmpeg)
 - `src/transcritor/login_browser.py`: navegador de login que captura gravações do Teams/SharePoint
 - `src/transcritor/export.py`: TXT, DOCX, SRT, VTT, JSON
+- `src/transcritor/recorder.py`: gravação de reuniões (ScreenCaptureKit no macOS; WASAPI e mss no Windows)
+- `src/transcritor/live.py`: transcrição ao vivo durante a gravação, com descarte do eco do alto-falante
 - `src/transcritor/app.py`: interface (PySide6)
 - `src/transcritor/style.py`: cores dos temas claro e escuro, folha de estilo e ícones desenhados
 - `src/transcritor/widgets.py`: lista de arquivos, leitura da transcrição, nomes dos falantes e layout que quebra linha

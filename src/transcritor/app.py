@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import sys
 import threading
 import traceback
@@ -14,15 +15,15 @@ from PySide6.QtGui import (
     QPixmap, QShortcut,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter,
     QStackedWidget, QSystemTrayIcon, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import __version__, downloader, export, models, recorder, style, widgets
-from .engine import LANGUAGES, Engine, Options, Transcript, fmt_time, output_stem
-from .widgets import FRAC_ROLE, META_ROLE, STATUS_ROLE, FileDelegate, FlowBox, Responsive, SpeakerEditor, TranscriptView
+from . import __version__, downloader, export, live, models, recorder, style, widgets
+from .engine import LANGUAGES, Engine, Options, Transcript, Utterance, fmt_time, output_stem
+from .widgets import FRAC_ROLE, META_ROLE, STATUS_ROLE, FileDelegate, FlowBox, LevelMeter, Responsive, SpeakerEditor, TranscriptView
 
 MEDIA_EXTS = {
     ".mp4", ".mov", ".mkv", ".avi", ".wmv", ".flv", ".webm", ".m4v", ".mpg", ".mpeg", ".3gp",
@@ -256,6 +257,15 @@ class RecordSignals(QObject):
     failed = Signal(str)
     stopped = Signal(str)
     log = Signal(str)
+    mics = Signal(list)
+    liveSegment = Signal(object)
+    liveStatus = Signal(str)
+
+
+MIC_SETTINGS = {
+    "win32": "ms-settings:privacy-microphone",
+    "darwin": "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+}
 
 
 def _red_dot() -> QIcon:
@@ -296,6 +306,13 @@ class MainWindow(QMainWindow):
         self.rec_sig.failed.connect(self.on_rec_failed)
         self.rec_sig.stopped.connect(self.on_rec_stopped)
         self.rec_sig.log.connect(self.append_log)
+        self.rec_sig.mics.connect(self._fill_mics)
+        self.rec_sig.liveSegment.connect(self.on_live_segment)
+        self.rec_sig.liveStatus.connect(self.on_live_status)
+        self.live: Optional[live.LiveTranscriber] = None
+        self.live_tr: Optional[Transcript] = None
+        self.levels = {"system": 0.0, "mic": 0.0}
+        self.mic_peak = 0.0                 # maior volume do microfone desde o início
         self.rec_timer = QTimer(self)
         self.rec_timer.timeout.connect(self._rec_tick)
         self.tray: Optional[QSystemTrayIcon] = None
@@ -393,25 +410,54 @@ class MainWindow(QMainWindow):
         row.addWidget(self.lbl_rec)
         row.addStretch(1)
         rp.addLayout(row)
-        self.lbl_rec_warn = QLabel("A gravação parou de receber dados. Pare e grave de novo.")
+        self.lbl_rec_warn = QLabel()
         self.lbl_rec_warn.setObjectName("recWarn")
         self.lbl_rec_warn.setWordWrap(True)
+        self.lbl_rec_warn.setOpenExternalLinks(True)
         self.lbl_rec_warn.hide()
         rp.addWidget(self.lbl_rec_warn)
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 2, 0, 0)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(6)
+        grid.setColumnStretch(0, 1)
         self.ck_rec_video = QCheckBox("Tela")
         self.ck_rec_video.setToolTip("Grava também o vídeo da tela. Desmarcado: só áudio (arquivo bem menor).")
-        self.ck_rec_sys = QCheckBox("Som do computador")
-        self.ck_rec_sys.setToolTip("O que sai no seu alto-falante ou fone: as vozes dos outros participantes.")
-        self.ck_rec_mic = QCheckBox("Microfone")
-        self.ck_rec_mic.setToolTip("A sua voz.")
-        rp.addWidget(_flow(self.ck_rec_video, self.ck_rec_sys, self.ck_rec_mic))
         self.cb_display = QComboBox()
-        self.cb_display.setToolTip("Tela a ser gravada")
+        self.cb_display.setToolTip("Qual tela gravar")
+        self.cb_display.setAccessibleName("Tela a gravar")
         _shrinkable(self.cb_display)
         for name in recorder.displays():
             self.cb_display.addItem(name)
         self.cb_display.setVisible(self.cb_display.count() > 1)
-        rp.addWidget(self.cb_display)
+        self.ck_rec_video.toggled.connect(self.cb_display.setEnabled)
+        self.ck_rec_sys = QCheckBox("Som do computador")
+        self.ck_rec_sys.setToolTip("O que sai no seu alto-falante ou fone: as vozes dos outros participantes.")
+        self.meter_sys = LevelMeter()
+        self.ck_rec_mic = QCheckBox("Microfone")
+        self.ck_rec_mic.setToolTip("A sua voz.")
+        self.meter_mic = LevelMeter()
+        self.cb_mic = QComboBox()
+        self.cb_mic.setToolTip("Qual microfone gravar. Use o mesmo que você usa na chamada.")
+        self.cb_mic.setAccessibleName("Microfone a gravar")
+        _shrinkable(self.cb_mic)
+        self.cb_mic.addItem("Padrão do sistema", "")
+        self.ck_rec_mic.toggled.connect(self.cb_mic.setEnabled)
+        grid.addWidget(self.ck_rec_video, 0, 0)
+        grid.addWidget(self.cb_display, 1, 0, 1, 2)
+        grid.addWidget(self.ck_rec_sys, 2, 0)
+        grid.addWidget(self.meter_sys, 2, 1, Qt.AlignmentFlag.AlignVCenter)
+        grid.addWidget(self.ck_rec_mic, 3, 0)
+        grid.addWidget(self.meter_mic, 3, 1, Qt.AlignmentFlag.AlignVCenter)
+        grid.addWidget(self.cb_mic, 4, 0, 1, 2)
+        rp.addLayout(grid)
+        self.ck_rec_live = QCheckBox("Transcrever ao vivo")
+        self.ck_rec_live.setToolTip("Mostra o texto enquanto a reunião acontece, separando você dos\n"
+                                    "participantes. Ao parar, a transcrição completa é gerada.")
+        rp.addWidget(self.ck_rec_live)
+        for m in (self.meter_sys, self.meter_mic):
+            m.hide()
         lv.addWidget(self.rec_panel)
 
         lv.addSpacing(14)
@@ -601,6 +647,25 @@ class MainWindow(QMainWindow):
         vv.addWidget(self.text, 1)
         vv.setStretch(vv.indexOf(self.text), 1)
         self.result.addWidget(view)
+
+        livepage = QWidget()
+        lp = QVBoxLayout(livepage)
+        lp.setContentsMargins(24, 18, 24, 0)
+        lp.setSpacing(4)
+        self.lbl_live_title = QLabel("Ao vivo")
+        self.lbl_live_title.setObjectName("title")
+        self.lbl_live_meta = QLabel()
+        self.lbl_live_meta.setProperty("role", "secondary")
+        self.lbl_live_meta.setWordWrap(True)
+        lp.addWidget(self.lbl_live_title)
+        lp.addWidget(self.lbl_live_meta)
+        lp.addSpacing(10)
+        lp.addWidget(_divider())
+        self.live_view = TranscriptView()
+        self.live_view.follow = True
+        lp.addWidget(self.live_view, 1)
+        self.result.addWidget(livepage)
+        self._live_render = widgets.debounce(self, 300, lambda: self.live_view.show_transcript(self.live_tr))
         self.tabs.addTab(self.result, "Transcrição")
 
         self.logbox = QPlainTextEdit()
@@ -633,6 +698,7 @@ class MainWindow(QMainWindow):
         QGuiApplication.styleHints().colorSchemeChanged.connect(lambda _: self._apply_theme())
         self._apply_theme()
         self.show_row(-1)
+        self._refresh_mics()
 
     def _apply_theme(self) -> None:
         t = style.tokens()
@@ -704,6 +770,10 @@ class MainWindow(QMainWindow):
         self.ck_rec_video.setChecked(s.value("rec_video", True, type=bool))
         self.ck_rec_sys.setChecked(s.value("rec_system", True, type=bool))
         self.ck_rec_mic.setChecked(s.value("rec_mic", True, type=bool))
+        self.ck_rec_live.setChecked(s.value("rec_live", True, type=bool))
+        name = s.value("rec_display", "", type=str)
+        if name and self.cb_display.findText(name) >= 0:
+            self.cb_display.setCurrentIndex(self.cb_display.findText(name))
         more = s.value("more_options", False, type=bool)
         self.btn_more.setChecked(more)
         self._toggle_more(more)
@@ -726,6 +796,10 @@ class MainWindow(QMainWindow):
         s.setValue("rec_video", self.ck_rec_video.isChecked())
         s.setValue("rec_system", self.ck_rec_sys.isChecked())
         s.setValue("rec_mic", self.ck_rec_mic.isChecked())
+        s.setValue("rec_live", self.ck_rec_live.isChecked())
+        s.setValue("rec_display", self.cb_display.currentText())
+        if self.cb_mic.count() > 1:          # só depois de a lista de microfones ter carregado
+            s.setValue("mic_device", self.cb_mic.currentData())
         s.setValue("more_options", self.btn_more.isChecked())
         s.setValue("geometry", self.saveGeometry())
 
@@ -954,11 +1028,24 @@ class MainWindow(QMainWindow):
         dest = recorder.default_name(self._download_dir(), video)
         rec = recorder.create()
         display = max(self.cb_display.currentIndex(), 0)
+        mic_device = self.cb_mic.currentData() or ""
         self._set_rec_busy("Iniciando…")
+        self.levels = {"system": 0.0, "mic": 0.0}
+        self.mic_peak = 0.0
+        self.live = None
+        self.live_tr = None
+        if self.ck_rec_live.isChecked():
+            lang = self.cb_lang.currentData()
+            self.live = live.LiveTranscriber(lang, self.ed_hot.text(), self.rec_sig.liveSegment.emit,
+                                             self.rec_sig.liveStatus.emit, self.rec_sig.log.emit)
+            self.live_tr = Transcript(str(dest), lang if lang in ("pt", "en") else "pt", 0.0,
+                                      live.LIVE_MODEL, [], dict(live.SOURCE_NAMES), True)
+            self.live.start()
 
         def run() -> None:
             try:
-                rec.start(dest, video, system, mic, display, self.rec_sig.log.emit)
+                rec.start(dest, video, system, mic, display, self.rec_sig.log.emit,
+                          mic_device=mic_device, on_audio=self._on_audio)
                 self.rec = rec
                 self.rec_sig.started.emit()
             except Exception as e:  # noqa: BLE001
@@ -967,9 +1054,20 @@ class MainWindow(QMainWindow):
 
         threading.Thread(target=run, daemon=True).start()
 
+    def _on_audio(self, source: str, samples, rate: int) -> None:
+        """Áudio de cada fonte, vindo das threads de captura: medidores e transcrição ao vivo."""
+        peak = float(abs(samples).max()) if len(samples) else 0.0
+        self.levels[source] = max(peak, self.levels[source])
+        if source == "mic":
+            self.mic_peak = max(self.mic_peak, peak)
+        if self.live:
+            self.live.feed(source, samples, rate)
+
     def stop_record(self) -> None:
         rec, self.rec = self.rec, None
         self.rec_timer.stop()
+        if self.live:
+            self.live.stop()
         self._set_rec_busy("Finalizando…")
 
         def run() -> None:
@@ -992,8 +1090,12 @@ class MainWindow(QMainWindow):
         self.rec_busy = True
         self.btn_rec.setEnabled(False)
         self.btn_rec.setText(text)
-        for w in (self.ck_rec_video, self.ck_rec_sys, self.ck_rec_mic, self.cb_display):
+        for w in self._rec_controls():
             w.setEnabled(False)
+
+    def _rec_controls(self) -> list:
+        return [self.ck_rec_video, self.ck_rec_sys, self.ck_rec_mic, self.cb_display, self.cb_mic,
+                self.ck_rec_live]
 
     def _rec_idle(self) -> None:
         self.rec_busy = False
@@ -1003,8 +1105,12 @@ class MainWindow(QMainWindow):
         self.lbl_rec_warn.hide()
         self._set_rec_live(False)
         self.setWindowTitle("Transcritor")
-        for w in (self.ck_rec_video, self.ck_rec_sys, self.ck_rec_mic, self.cb_display):
+        for w in self._rec_controls():
             w.setEnabled(True)
+        self.cb_display.setEnabled(self.ck_rec_video.isChecked())
+        self.cb_mic.setEnabled(self.ck_rec_mic.isChecked())
+        for m in (self.meter_sys, self.meter_mic):
+            m.hide()
         if self.tray:
             self.tray.hide()
 
@@ -1017,7 +1123,15 @@ class MainWindow(QMainWindow):
         self.btn_rec.setEnabled(True)
         self.btn_rec.setText("Parar e transcrever")
         self._set_rec_live(True)
-        self.rec_timer.start(500)
+        self.meter_sys.setVisible(self.ck_rec_sys.isChecked())
+        self.meter_mic.setVisible(self.ck_rec_mic.isChecked())
+        if self.live_tr is not None:
+            self.lbl_live_meta.setText("O texto aparece aqui enquanto vocês falam. Ao parar, a "
+                                       "transcrição completa identifica cada participante.")
+            self.live_view.show_transcript(self.live_tr)
+            self.result.setCurrentIndex(2)
+            self.tabs.setCurrentIndex(0)
+        self.rec_timer.start(100)
         self._rec_tick()
         self.append_log("— Gravação iniciada.")
         if QSystemTrayIcon.isSystemTrayAvailable():
@@ -1045,22 +1159,84 @@ class MainWindow(QMainWindow):
             self.append_log(f"A gravação foi interrompida: {err}")
             self.stop_record()
             return
-        t = int(time.monotonic() - self.rec_t0)
+        for src, meter in (("system", self.meter_sys), ("mic", self.meter_mic)):
+            meter.set_peak(self.levels[src])
+            self.levels[src] *= 0.6
+        elapsed = time.monotonic() - self.rec_t0
+        t = int(elapsed)
         txt = f"{t // 3600:02d}:{t % 3600 // 60:02d}:{t % 60:02d}"
-        stalled = self.rec.stalled()
-        self.lbl_rec_warn.setVisible(stalled)
-        if stalled and not self.rec_warned:
-            self.rec_warned = True
-            self.append_log("Aviso: a gravação parou de receber áudio/vídeo do sistema.")
+        if txt == self.lbl_rec.text():
+            return
+        warnings = self.rec.warnings()
+        if self.rec.stalled():
+            warnings.append("A gravação parou de receber dados. Pare e grave de novo.")
+            if not self.rec_warned:
+                self.rec_warned = True
+                self.append_log("Aviso: a gravação parou de receber áudio/vídeo do sistema.")
+        mic_blocked = any("microfone" in w.lower() for w in warnings)
+        if self.ck_rec_mic.isChecked() and not mic_blocked and elapsed > 8 and self.mic_peak < 5e-4:
+            warnings.append("Não está chegando som do seu microfone. Confira se ele está ligado e "
+                            "escolha em Microfone o mesmo que você usa na chamada.")
+            mic_blocked = True
+        html_warn = "<br><br>".join(html.escape(w) for w in warnings)
+        if mic_blocked and sys.platform in MIC_SETTINGS:
+            html_warn += f' <a href="{MIC_SETTINGS[sys.platform]}">Abrir os ajustes do microfone</a>'
+        self.lbl_rec_warn.setText(html_warn)
+        self.lbl_rec_warn.setVisible(bool(warnings))
         self.lbl_rec.setText(txt)
+        if self.live_tr is not None:
+            self.lbl_live_title.setText(f"Ao vivo, {txt}")
         self.setWindowTitle(f"Gravando {txt} · Transcritor")
         if self.tray:
             self.tray.setToolTip(f"Transcritor: gravando ({txt})")
+
+    @Slot(object)
+    def on_live_segment(self, seg) -> None:
+        tr = self.live_tr
+        if tr is None:
+            return
+        last = tr.utterances[-1] if tr.utterances else None
+        if last and last.speaker == seg.source and seg.start - last.end < 3 and len(last.text) < 400:
+            last.text += " " + seg.text
+            last.end = max(last.end, seg.end)
+        else:
+            # Falas de fontes diferentes chegam fora de ordem: insere pela hora em que começaram.
+            u = Utterance(seg.start, seg.end, seg.source, seg.text)
+            i = len(tr.utterances)
+            while i > 0 and tr.utterances[i - 1].start > u.start:
+                i -= 1
+            tr.utterances.insert(i, u)
+        tr.duration = max(tr.duration, seg.end)
+        self._live_render.start()
+
+    @Slot(str)
+    def on_live_status(self, msg: str) -> None:
+        if self.live_tr is None:
+            return
+        self.lbl_live_meta.setText(msg or "O texto aparece aqui enquanto vocês falam. Ao parar, a "
+                                          "transcrição completa identifica cada participante.")
+
+    def _refresh_mics(self) -> None:
+        threading.Thread(target=lambda: self.rec_sig.mics.emit(recorder.mic_devices()), daemon=True).start()
+
+    @Slot(list)
+    def _fill_mics(self, devices: list) -> None:
+        want = self.cb_mic.currentData() if self.cb_mic.count() > 1 else \
+            self.settings.value("mic_device", "", type=str)
+        self.cb_mic.clear()
+        self.cb_mic.addItem("Padrão do sistema", "")
+        for dev_id, name in devices:
+            self.cb_mic.addItem(name, dev_id)
+        i = self.cb_mic.findData(want)
+        self.cb_mic.setCurrentIndex(max(i, 0))
 
     @Slot(str)
     def on_rec_failed(self, msg: str) -> None:
         self.rec = None
         self.rec_timer.stop()
+        if self.live:
+            self.live.stop()
+        self.live = self.live_tr = None
         self._rec_idle()
         self.append_log(f"Erro na gravação: {msg}")
         QMessageBox.warning(self, "Transcritor", f"Problema na gravação:\n\n{msg}")
@@ -1068,8 +1244,18 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def on_rec_stopped(self, path: str) -> None:
         self._rec_idle()
+        self._refresh_mics()
         self.append_log(f"Gravação salva: {path}")
+        preview, self.live, self.live_tr = self.live_tr, None, None
         self.add_files([path])
+        if preview is not None and preview.utterances:
+            preview.source = path
+            self.files[-1]["preview"] = preview
+            try:   # guarda o texto ao vivo: se a transcrição completa falhar, ele não se perde
+                stem = Path(path).with_name(Path(path).stem + " (ao vivo)")
+                self.append_log(f"Salvo: {export.export(preview, 'txt', stem)}")
+            except Exception as e:  # noqa: BLE001
+                self.append_log(f"Não foi possível salvar o texto ao vivo: {e}")
         self.list.setCurrentRow(len(self.files) - 1)
         self._show_window()
         if self.thread:
@@ -1152,17 +1338,26 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------- results
     def show_row(self, row: int) -> None:
         self.current_row = row
-        tr = self.files[row]["transcript"] if 0 <= row < len(self.files) else None
+        f = self.files[row] if 0 <= row < len(self.files) else {}
+        tr = f.get("transcript")
+        preview = tr is None and f.get("preview") is not None
+        if preview:
+            tr = f["preview"]
         self._shown = tr
         self.empty.set_state(has_files=bool(self.files))
-        self._set_result_enabled(tr is not None)
+        self._set_result_enabled(tr is not None and not preview)
+        self.btn_copy.setEnabled(tr is not None)
+        if self.live_tr is not None and self.result.currentIndex() == 2 and tr is None:
+            return          # gravando com texto ao vivo: não troca a tela
         if tr is None:
             self.result.setCurrentIndex(0)
             self.text.show_transcript(None)
             return
         self.result.setCurrentIndex(1)
         self.lbl_title.setText(Path(tr.source).stem)
-        self.lbl_meta.setText(self._summary(tr, with_lang=True))
+        self.lbl_meta.setText("Texto ao vivo. A transcrição completa, com cada participante "
+                              "identificado, está sendo gerada." if preview
+                              else self._summary(tr, with_lang=True))
         self.speakers_box.setVisible(tr.diarized)
         self.speakers.set_speakers(tr.speaker_names)
         self.text.verticalScrollBar().setValue(0)
@@ -1182,7 +1377,8 @@ class MainWindow(QMainWindow):
         tr = self._shown
         if tr is None:
             return
-        tr.speaker_names[spk] = name.strip() or f"Falante {spk + 1}"
+        default = live.SOURCE_NAMES[spk] if tr.model == live.LIVE_MODEL else f"Falante {spk + 1}"
+        tr.speaker_names[spk] = name.strip() or default
         self._rerender.start()
 
     def _current(self):
@@ -1211,8 +1407,9 @@ class MainWindow(QMainWindow):
 
     def copy_text(self) -> None:
         f = self._current()
-        if f and f["transcript"]:
-            QApplication.clipboard().setText(export.to_text(f["transcript"]))
+        tr = f and (f["transcript"] or f.get("preview"))
+        if tr:
+            QApplication.clipboard().setText(export.to_text(tr))
             self.status.setText("Texto copiado para a área de transferência.")
 
     def closeEvent(self, e) -> None:

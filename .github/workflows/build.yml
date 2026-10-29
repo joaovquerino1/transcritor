@@ -72,21 +72,26 @@ jobs:
         if: runner.os == 'Windows'
         uses: LABSN/sound-ci-helpers@v1
 
-      - name: Teste de gravação de reunião (Windows, tela + som do computador)
+      - name: Teste de gravação de reunião (Windows, tela 1 + som do computador + ao vivo)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           python -c "import imageio_ffmpeg,subprocess;subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(),'-hide_banner','-loglevel','error','-y','-i','tests/fixtures/reuniao.mp4','-ac','2','-ar','48000','fala.wav'],check=True)"
           New-Item -ItemType Directory -Force smoke-rec | Out-Null
-          $p = Start-Process -FilePath dist\Transcritor\Transcritor.exe -PassThru -ArgumentList '--cli','--gravar','60','--modelo','small','--formatos','txt','--saida','smoke-rec'
-          Start-Sleep -Seconds 8
+          $log = "$env:LOCALAPPDATA\Transcritor\transcritor.log"
+          Start-Process -FilePath dist\Transcritor\Transcritor.exe -Wait -ArgumentList '--cli','--dispositivos'
+          Get-Content $log -ErrorAction SilentlyContinue
+          if (-not (Select-String -Path $log -Pattern 'Tela 1' -Quiet)) { Write-Error "sem lista de telas"; exit 1 }
+          $p = Start-Process -FilePath dist\Transcritor\Transcritor.exe -PassThru -ArgumentList '--cli','--gravar','60','--tela','1','--ao-vivo','--modelo','small','--formatos','txt','--saida','smoke-rec'
+          Start-Sleep -Seconds 12
           (New-Object Media.SoundPlayer "$PWD\fala.wav").PlaySync()
           $p.WaitForExit()
-          Get-Content "$env:LOCALAPPDATA\Transcritor\transcritor.log" -ErrorAction SilentlyContinue
+          Get-Content $log -ErrorAction SilentlyContinue
           Get-ChildItem smoke-rec
           Get-Content smoke-rec\*.txt
           if (-not (Get-ChildItem smoke-rec\*.mp4)) { Write-Error "sem vídeo"; exit 1 }
           if (-not (Select-String -Path smoke-rec\*.txt -Pattern 'trimestre' -Quiet)) { Write-Error "sem transcrição"; exit 1 }
+          if (-not (Select-String -Path $log -Pattern 'ao vivo.*Participantes' -Quiet)) { Write-Error "sem transcrição ao vivo"; exit 1 }
 
       - name: Instalador Windows (Inno Setup)
         if: runner.os == 'Windows'

@@ -7,7 +7,8 @@ import html
 from typing import Callable
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QFontMetrics, QPainter, QTextFrameFormat
+from PySide6.QtCore import QRectF
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QTextFrameFormat
 from PySide6.QtWidgets import (
     QApplication, QBoxLayout, QHBoxLayout, QLabel, QLayout, QLineEdit, QStyle,
     QStyledItemDelegate, QStyleOptionViewItem, QTextBrowser, QWidget, QWidgetItem,
@@ -174,6 +175,36 @@ class FileDelegate(QStyledItemDelegate):
         p.restore()
 
 
+class LevelMeter(QWidget):
+    """Barrinha de volume de uma fonte de áudio: mostra na hora se o microfone está chegando."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setFixedSize(54, 6)
+        self.level = 0.0
+        self.setToolTip("Volume que está chegando")
+
+    def set_peak(self, peak: float) -> None:
+        import math
+        db = 20 * math.log10(max(peak, 1e-5))
+        level = min(max((db + 60) / 60, 0.0), 1.0)      # -60 dB .. 0 dB
+        if abs(level - self.level) > 0.01:
+            self.level = level
+            self.update()
+
+    def paintEvent(self, e) -> None:
+        t = style.tokens()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        r = QRectF(self.rect())
+        p.setBrush(QColor(t.line))
+        p.drawRoundedRect(r, 3, 3)
+        if self.level > 0:
+            p.setBrush(QColor(t.ok))
+            p.drawRoundedRect(QRectF(r.x(), r.y(), r.width() * self.level, r.height()), 3, 3)
+
+
 class SpeakerEditor(FlowBox):
     """Um campo por falante, com a cor dele, para trocar "Falante 2" pelo nome real."""
 
@@ -228,6 +259,7 @@ class TranscriptView(QTextBrowser):
         self.document().setDefaultFont(f)
         self._tr: Transcript | None = None
         self._narrow = False
+        self.follow = False        # ao vivo: acompanha o fim do texto enquanto ele cresce
         self._timer = QTimer(self, singleShot=True, interval=120)
         self._timer.timeout.connect(self._rerender)
 
@@ -238,13 +270,14 @@ class TranscriptView(QTextBrowser):
     def _rerender(self) -> None:
         bar = self.verticalScrollBar()
         pos = bar.value()
+        at_end = pos >= bar.maximum() - 40
         if self._tr is None:
             self.clear()
             return
         self._narrow = self.viewport().width() < self.NARROW
         self.setHtml(transcript_html(self._tr, style.tokens(), self._narrow))
         self._apply_margins()
-        bar.setValue(pos)
+        bar.setValue(bar.maximum() if self.follow and at_end else pos)
 
     def _apply_margins(self) -> None:
         w = self.viewport().width()
