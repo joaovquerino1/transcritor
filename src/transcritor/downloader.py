@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import sys
 import threading
 import time
@@ -97,6 +98,35 @@ def unique_path(path: Path) -> Path:
 def ffmpeg_exe() -> str:
     import imageio_ffmpeg
     return imageio_ffmpeg.get_ffmpeg_exe()
+
+
+def deno_exe() -> Optional[str]:
+    """Runtime de JavaScript que o yt-dlp usa para resolver os desafios do YouTube.
+
+    Sem ele o yt-dlp fica restrito a um cliente do YouTube que costuma levar HTTP 403.
+    Vai embutido no app; um app aberto pelo Finder não enxerga o deno do Homebrew.
+    """
+    name = "deno.exe" if sys.platform == "win32" else "deno"
+    base = getattr(sys, "_MEIPASS", None)
+    if base and (Path(base) / "deno" / name).is_file():
+        return str(Path(base) / "deno" / name)
+    try:
+        import deno
+        return deno.find_deno_bin()
+    except Exception:  # noqa: BLE001
+        pass
+    for cand in (shutil.which("deno"), "/opt/homebrew/bin/deno", str(Path.home() / ".deno/bin" / name)):
+        if cand and Path(cand).is_file():
+            return cand
+    return None
+
+
+def js_runtimes() -> dict:
+    runtimes: dict = {"deno": {}, "node": {}, "bun": {}, "quickjs": {}}
+    path = deno_exe()
+    if path:
+        runtimes["deno"] = {"path": path}
+    return runtimes
 
 
 # ---------------------------------------------------------------- yt-dlp
@@ -205,7 +235,7 @@ def download_ytdlp(url: str, out_dir: Path, keep_video: bool, progress: Progress
         "logger": _Logger(log),
         "windowsfilenames": True,
         "noprogress": True,
-        "js_runtimes": {"deno": {}, "node": {}, "bun": {}, "quickjs": {}},
+        "js_runtimes": js_runtimes(),
         "retries": 5,
         "fragment_retries": 10,
         "concurrent_fragment_downloads": 4,

@@ -9,15 +9,17 @@ Otimizado para **português do Brasil** e **inglês** (também tem detecção au
 ## Como usar
 
 1. Instale (veja abaixo) e abra o Transcritor.
-2. Arraste um ou mais vídeos para a lista (pastas também funcionam).
-3. Escolha o idioma e clique em **Transcrever**.
+2. Arraste um ou mais vídeos para a janela (pastas também funcionam), ou use **+** / ⌘O.
+3. Escolha o idioma e clique em **Transcrever** (⌘↩).
 4. Na primeira vez, o programa baixa os modelos de IA (~1,7 GB no modo recomendado). Depois disso funciona offline.
-5. Veja o resultado no painel direito. Dá para renomear os falantes ("Falante 1" → "Maria") e clicar em **Salvar arquivos novamente**.
+5. Veja o resultado ao lado da lista. Em **Nomes dos falantes** dá para trocar "Falante 1" por "Maria"; depois clique em **Salvar de novo**.
+
+A janela se ajusta a telas pequenas: abaixo de 900 px de largura a barra lateral se recolhe e volta pelo botão no canto superior (⌘⌥S). O tema claro ou escuro acompanha o sistema. As opções menos usadas (número de falantes, separação de vozes, vocabulário, pasta e formatos) ficam em **Mais opções**.
 
 ## Baixar da internet
 
 - **YouTube, Vimeo, Instagram, X, Facebook, TikTok e +1000 sites**: cole o link em **Baixar da internet** e clique em **Baixar**. Playlists também funcionam.
-- **Gravações do Teams / SharePoint / OneDrive / Stream**: clique em **Teams / SharePoint (com login)…** (ou cole o link da gravação). Abre um navegador dentro do app:
+- **Gravações do Teams / SharePoint / OneDrive / Stream**: clique em **Entrar no Teams ou SharePoint…** (ou cole o link da gravação). Abre um navegador dentro do app:
   1. Entre com sua conta da empresa (o login fica salvo; há um botão **Sair da conta**).
   2. Abra a gravação e aperte **play**.
   3. Quando aparecer **Vídeo detectado!**, clique em **Baixar vídeo**.
@@ -31,11 +33,13 @@ Otimizado para **português do Brasil** e **inglês** (também tem detecção au
 
 Respeite as políticas da sua empresa e os direitos dos autores: baixe só o que você tem permissão para usar. Vídeos com DRM não são suportados. Se a sua empresa exigir dispositivo gerenciado no login (acesso condicional), o navegador embutido pode ser bloqueado; nesse caso baixe a gravação pelo navegador normal e arraste o arquivo para o app.
 
+O app traz o Deno embutido: o yt-dlp precisa dele para resolver os desafios de JavaScript do YouTube, e sem ele os downloads do YouTube costumam falhar com HTTP 403.
+
 O componente de download (yt-dlp) se atualiza sozinho uma vez por semana a partir do GitHub oficial do projeto, porque os sites mudam com frequência.
 
 Dicas:
-- Se você sabe quantas pessoas falam, informe em **Nº de falantes**: é o que mais melhora a identificação.
-- Em modo automático, use **Separação de vozes**: aumente se pessoas diferentes saírem juntas, diminua se a mesma pessoa virar vários falantes.
+- Se você sabe quantas pessoas falam, informe em **Mais opções › Falantes**: é o que mais melhora a identificação.
+- Em modo automático, use **Mais opções › Separação**: aumente se pessoas diferentes saírem juntas, diminua se a mesma pessoa virar vários falantes.
 - Em **Vocabulário**, coloque nomes próprios e siglas que aparecem no vídeo (ex.: `Querino, Itaú, OKR, Kubernetes`).
 
 ## Gravar reunião
@@ -105,4 +109,6 @@ No macOS o executável fica em `/Applications/Transcritor.app/Contents/MacOS/Tra
 - `src/transcritor/login_browser.py`: navegador de login que captura gravações do Teams/SharePoint
 - `src/transcritor/export.py`: TXT, DOCX, SRT, VTT, JSON
 - `src/transcritor/app.py`: interface (PySide6)
+- `src/transcritor/style.py`: cores dos temas claro e escuro, folha de estilo e ícones desenhados
+- `src/transcritor/widgets.py`: lista de arquivos, leitura da transcrição, nomes dos falantes e layout que quebra linha
 - `packaging/`: PyInstaller, DMG, Inno Setup e gerador de ícones

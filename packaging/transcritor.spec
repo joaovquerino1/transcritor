@@ -18,6 +18,9 @@ datas += collect_data_files("yt_dlp_ejs")
 binaries = []
 for pkg in ("ctranslate2", "sherpa_onnx", "onnxruntime", "av"):
     binaries += collect_dynamic_libs(pkg)
+# Deno: o yt-dlp precisa de um runtime de JavaScript para baixar do YouTube sem HTTP 403.
+import deno  # noqa: E402
+binaries += [(deno.find_deno_bin(), "deno")]
 hiddenimports = collect_submodules("sherpa_onnx") + ["ctranslate2", "av", "tokenizers"]
 hiddenimports += collect_submodules("yt_dlp") + ["yt_dlp_ejs", "imageio_ffmpeg"]
 # Dependências opcionais do yt-dlp (o yt-dlp atualizado em tempo de execução também as usa)
