@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import html
 import sys
 import threading
 import traceback
@@ -10,17 +9,20 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
+from PySide6.QtGui import (
+    QColor, QDesktopServices, QFontDatabase, QGuiApplication, QIcon, QKeySequence, QPainter, QPalette,
+    QPixmap, QShortcut,
+)
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout,
-    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSlider, QSpinBox,
-    QSplitter, QSystemTrayIcon, QTableWidget, QTableWidgetItem, QTabWidget, QTextBrowser,
-    QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter,
+    QStackedWidget, QSystemTrayIcon, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import __version__, downloader, export, models, recorder
+from . import __version__, downloader, export, models, recorder, style, widgets
 from .engine import LANGUAGES, Engine, Options, Transcript, fmt_time, output_stem
+from .widgets import FRAC_ROLE, META_ROLE, STATUS_ROLE, FileDelegate, FlowBox, Responsive, SpeakerEditor, TranscriptView
 
 MEDIA_EXTS = {
     ".mp4", ".mov", ".mkv", ".avi", ".wmv", ".flv", ".webm", ".m4v", ".mpg", ".mpeg", ".3gp",
@@ -28,14 +30,111 @@ MEDIA_EXTS = {
     ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma", ".aiff", ".aif", ".amr",
 }
 
-SPEAKER_COLORS = ["#1f5fbf", "#b3401a", "#2e7d32", "#7b1fa2", "#00838f", "#ad1457", "#6d4c41", "#455a64"]
+STATUS_TEXT = {"pending": "Na fila", "running": "Preparando…", "done": "", "error": "Erro: veja o Registro",
+               "cancelled": "Cancelado"}
 
-STATUS = {"pending": "⏳", "running": "⚙️", "done": "✅", "error": "❌", "cancelled": "⏹"}
+FORMAT_SHORT = {"txt": "Texto", "docx": "Word", "srt": "SRT", "vtt": "VTT", "json": "JSON"}
 
 
 def resource_path(name: str) -> Path:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent.parent))
     return base / "assets" / name
+
+
+def _media_in(urls) -> list[str]:
+    files: list[str] = []
+    for p in (Path(u.toLocalFile()) for u in urls if u.isLocalFile()):
+        if p.is_dir():
+            files += [str(f) for f in sorted(p.rglob("*")) if f.suffix.lower() in MEDIA_EXTS]
+        else:
+            files.append(str(p))
+    return files
+
+
+def _section(text: str) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setProperty("role", "section")
+    return lbl
+
+
+def _divider() -> QFrame:
+    f = QFrame()
+    f.setProperty("role", "divider")
+    return f
+
+
+def _tool(icon_name: str, tip: str) -> QToolButton:
+    b = QToolButton()
+    b.setObjectName("flat")
+    b.setToolTip(tip)
+    b.setAccessibleName(tip)
+    b.setIcon(style.icon(icon_name, "#000"))
+    return b
+
+
+def _flow(*items: QWidget, spacing: int = 14) -> QWidget:
+    """Caixas de seleção lado a lado que descem de linha se a barra ficar estreita."""
+    w = FlowBox(hspacing=spacing, vspacing=6)
+    for it in items:
+        w.flow.addWidget(it)
+    return w
+
+
+def _shrinkable(cb: QComboBox) -> None:
+    # Sem isso a opção mais longa define a largura mínima da barra lateral inteira.
+    cb.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+    cb.setMinimumContentsLength(8)
+
+
+class EmptyState(QWidget):
+    """O que aparece antes de haver uma transcrição: diz como começar e aceita arquivos."""
+
+    filesDropped = Signal(list)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("emptyState")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        self.setAcceptDrops(True)
+        v = QVBoxLayout(self)
+        v.addStretch(2)
+        self.title = QLabel()
+        self.title.setObjectName("emptyTitle")
+        self.title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.title.setWordWrap(True)
+        self.body = QLabel()
+        self.body.setProperty("role", "secondary")
+        self.body.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.body.setWordWrap(True)
+        self.body.setMaximumWidth(440)
+        v.addWidget(self.title)
+        v.addSpacing(6)
+        # Centralizado com espaçadores: com AlignHCenter o rótulo perde a quebra de linha.
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(self.body, 10)
+        row.addStretch(1)
+        v.addLayout(row)
+        v.addStretch(3)
+        self.set_state(has_files=False)
+
+    def set_state(self, has_files: bool) -> None:
+        if has_files:
+            self.title.setText("Nada transcrito ainda")
+            self.body.setText("Clique em Transcrever. Ao terminar, o texto de cada arquivo aparece aqui, "
+                              "separado por falante.")
+        else:
+            self.title.setText("Comece por um vídeo, um link ou uma gravação")
+            self.body.setText("Arraste vídeos ou áudios para esta janela, cole um link na barra lateral "
+                              "ou grave a sua próxima reunião.")
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        self.filesDropped.emit(_media_in(e.mimeData().urls()))
+        e.acceptProposedAction()
 
 
 class FileList(QListWidget):
@@ -44,8 +143,13 @@ class FileList(QListWidget):
     def __init__(self) -> None:
         super().__init__()
         self.setAcceptDrops(True)
+        self.setObjectName("files")
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.setMinimumHeight(110)
+        self.setItemDelegate(FileDelegate(self))
+        self.setUniformItemSizes(True)
+        self.setMinimumHeight(150)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls():
@@ -54,24 +158,17 @@ class FileList(QListWidget):
     dragMoveEvent = dragEnterEvent
 
     def dropEvent(self, e):
-        paths = [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
-        files: list[str] = []
-        for p in map(Path, paths):
-            if p.is_dir():
-                files += [str(f) for f in sorted(p.rglob("*")) if f.suffix.lower() in MEDIA_EXTS]
-            else:
-                files.append(str(p))
-        self.filesDropped.emit(files)
+        self.filesDropped.emit(_media_in(e.mimeData().urls()))
         e.acceptProposedAction()
 
     def paintEvent(self, e):
         super().paintEvent(e)
         if self.count() == 0:
-            from PySide6.QtGui import QPainter
             p = QPainter(self.viewport())
-            p.setPen(self.palette().placeholderText().color())
-            p.drawText(self.viewport().rect(), Qt.AlignmentFlag.AlignCenter,
-                       "Arraste vídeos ou áudios para cá\n(qualquer formato)")
+            p.setPen(QColor(style.tokens().text2))
+            p.drawText(self.viewport().rect().adjusted(8, 8, -8, -8),
+                       Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+                       "Arraste vídeos ou áudios para cá.\nQualquer formato serve.")
 
 
 class Worker(QObject):
@@ -184,7 +281,6 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Transcritor")
-        self.resize(1180, 860)
         self.settings = QSettings("Transcritor", "Transcritor")
         self.engine = Engine()
         self.files: list[dict] = []       # {path, status, transcript, outputs}
@@ -211,218 +307,374 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
-        left = QWidget()
-        lv = QVBoxLayout(left)
-        lv.setContentsMargins(12, 12, 6, 12)
+        self.setMinimumSize(660, 500)
 
-        lv.addWidget(QLabel("<b>Arquivos</b>"))
+        # Barra lateral: tudo o que entra (arquivos, links, gravação) e as opções.
+        inner = QWidget()
+        inner.setObjectName("sideInner")
+        lv = QVBoxLayout(inner)
+        lv.setContentsMargins(16, 14, 16, 16)
+        lv.setSpacing(0)
+
+        head = QHBoxLayout()
+        head.setSpacing(2)
+        head.addWidget(_section("Arquivos"))
+        head.addStretch(1)
+        self.btn_add = _tool("plus", "Adicionar vídeos ou áudios (⌘O)")
+        self.btn_add.clicked.connect(self.choose_files)
+        self.btn_remove = _tool("minus", "Remover os selecionados (⌫)")
+        self.btn_remove.clicked.connect(self.remove_selected)
+        self.btn_clear = QToolButton()
+        self.btn_clear.setObjectName("flat")
+        self.btn_clear.setText("Limpar")
+        self.btn_clear.setToolTip("Tirar todos os arquivos da lista")
+        self.btn_clear.clicked.connect(self.clear_files)
+        for b in (self.btn_add, self.btn_remove, self.btn_clear):
+            head.addWidget(b)
+        lv.addLayout(head)
+        lv.addSpacing(6)
         self.list = FileList()
         self.list.filesDropped.connect(self.add_files)
         self.list.currentRowChanged.connect(self.show_row)
         lv.addWidget(self.list, 1)
 
+        lv.addSpacing(18)
+        lv.addWidget(_divider())
+        lv.addSpacing(14)
+        lv.addWidget(_section("Baixar da internet"))
+        lv.addSpacing(8)
         row = QHBoxLayout()
-        self.btn_add = QPushButton("Adicionar…")
-        self.btn_add.clicked.connect(self.choose_files)
-        self.btn_remove = QPushButton("Remover")
-        self.btn_remove.clicked.connect(self.remove_selected)
-        self.btn_clear = QPushButton("Limpar")
-        self.btn_clear.clicked.connect(self.clear_files)
-        for b in (self.btn_add, self.btn_remove, self.btn_clear):
-            row.addWidget(b)
-        lv.addLayout(row)
-
-        dl = QGroupBox("Baixar da internet")
-        dv = QVBoxLayout(dl)
-        row = QHBoxLayout()
+        row.setSpacing(6)
         self.ed_url = QLineEdit()
-        self.ed_url.setPlaceholderText("Cole um link do YouTube, Teams, SharePoint, Vimeo, Instagram…")
+        self.ed_url.setPlaceholderText("Link do YouTube, Teams, Vimeo…")
+        self.ed_url.setToolTip("YouTube, Teams, SharePoint, OneDrive, Vimeo, Instagram e muitos outros sites")
         self.ed_url.setClearButtonEnabled(True)
         self.ed_url.returnPressed.connect(self.download_url)
         self.btn_dl = QPushButton("Baixar")
         self.btn_dl.clicked.connect(self.download_url)
         row.addWidget(self.ed_url, 1)
         row.addWidget(self.btn_dl)
-        dv.addLayout(row)
-        row = QHBoxLayout()
-        self.btn_login = QPushButton("Teams / SharePoint (com login)…")
+        lv.addLayout(row)
+        lv.addSpacing(4)
+        self.btn_login = QToolButton()
+        self.btn_login.setObjectName("link")
+        self.btn_login.setText("Entrar no Teams ou SharePoint…")
+        self.btn_login.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_login.setToolTip("Abre um navegador para entrar com sua conta e capturar gravações\n"
                                   "do Teams, SharePoint, OneDrive, Stream ou outros sites com login.")
         self.btn_login.clicked.connect(lambda: self.open_login())
+        lv.addWidget(self.btn_login)
+        lv.addSpacing(4)
         self.ck_video = QCheckBox("Manter o vídeo")
         self.ck_video.setToolTip("Desmarcado: baixa só o áudio, mais rápido e suficiente para transcrever.")
         self.ck_auto = QCheckBox("Transcrever ao terminar")
-        row.addWidget(self.btn_login)
-        row.addStretch(1)
-        row.addWidget(self.ck_video)
-        row.addWidget(self.ck_auto)
-        dv.addLayout(row)
-        lv.addWidget(dl)
+        lv.addWidget(_flow(self.ck_video, self.ck_auto))
 
-        rec = QGroupBox("Gravar reunião")
-        rv_ = QVBoxLayout(rec)
+        lv.addSpacing(18)
+        lv.addWidget(_divider())
+        lv.addSpacing(10)
+        self.rec_panel = QWidget()
+        self.rec_panel.setObjectName("recPanel")
+        rp = QVBoxLayout(self.rec_panel)
+        rp.setContentsMargins(0, 0, 0, 0)
+        rp.setSpacing(8)
+        rp.addWidget(_section("Gravar reunião"))
         row = QHBoxLayout()
-        self.btn_rec = QPushButton("●  Gravar")
-        self.btn_rec.setMinimumWidth(170)
+        row.setSpacing(10)
+        self.btn_rec = QPushButton("Gravar")
+        self.btn_rec.setIcon(style.icon("record", style.tokens().rec, 14))
         self.btn_rec.setToolTip("Grava a chamada enquanto ela acontece. Ao parar, a transcrição\n"
-                                "começa automaticamente com as configurações abaixo.")
+                                "começa automaticamente com as opções abaixo.")
         self.btn_rec.clicked.connect(self.toggle_record)
         self.lbl_rec = QLabel("")
-        self.cb_display = QComboBox()
-        self.cb_display.setToolTip("Tela a ser gravada")
-        for name in recorder.displays():
-            self.cb_display.addItem(name)
-        self.cb_display.setVisible(self.cb_display.count() > 1)
+        self.lbl_rec.setObjectName("recTime")
+        self.lbl_rec.setFont(style.tabular(self.lbl_rec.font()))
         row.addWidget(self.btn_rec)
         row.addWidget(self.lbl_rec)
         row.addStretch(1)
-        row.addWidget(self.cb_display)
-        rv_.addLayout(row)
-        row = QHBoxLayout()
+        rp.addLayout(row)
+        self.lbl_rec_warn = QLabel("A gravação parou de receber dados. Pare e grave de novo.")
+        self.lbl_rec_warn.setObjectName("recWarn")
+        self.lbl_rec_warn.setWordWrap(True)
+        self.lbl_rec_warn.hide()
+        rp.addWidget(self.lbl_rec_warn)
         self.ck_rec_video = QCheckBox("Tela")
         self.ck_rec_video.setToolTip("Grava também o vídeo da tela. Desmarcado: só áudio (arquivo bem menor).")
         self.ck_rec_sys = QCheckBox("Som do computador")
-        self.ck_rec_sys.setToolTip("O que sai no seu alto-falante/fone: as vozes dos outros participantes.")
+        self.ck_rec_sys.setToolTip("O que sai no seu alto-falante ou fone: as vozes dos outros participantes.")
         self.ck_rec_mic = QCheckBox("Microfone")
         self.ck_rec_mic.setToolTip("A sua voz.")
-        for w in (self.ck_rec_video, self.ck_rec_sys, self.ck_rec_mic):
-            row.addWidget(w)
-        row.addStretch(1)
-        rv_.addLayout(row)
-        lv.addWidget(rec)
+        rp.addWidget(_flow(self.ck_rec_video, self.ck_rec_sys, self.ck_rec_mic))
+        self.cb_display = QComboBox()
+        self.cb_display.setToolTip("Tela a ser gravada")
+        _shrinkable(self.cb_display)
+        for name in recorder.displays():
+            self.cb_display.addItem(name)
+        self.cb_display.setVisible(self.cb_display.count() > 1)
+        rp.addWidget(self.cb_display)
+        lv.addWidget(self.rec_panel)
 
-        box = QGroupBox("Configurações")
-        form = QFormLayout(box)
+        lv.addSpacing(14)
+        lv.addWidget(_divider())
+        lv.addSpacing(14)
+        lv.addWidget(_section("Transcrição"))
+        lv.addSpacing(8)
+        form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(8)
         self.cb_lang = QComboBox()
+        _shrinkable(self.cb_lang)
         for k, v in LANGUAGES.items():
             self.cb_lang.addItem(v, k)
         form.addRow("Idioma:", self.cb_lang)
-
         self.cb_model = QComboBox()
+        _shrinkable(self.cb_model)
         for m in models.WHISPER_MODELS:
             self.cb_model.addItem(f"{m.label} · {m.approx_mb / 1000:.1f} GB", m.key)
+            self.cb_model.setItemData(self.cb_model.count() - 1, m.label, Qt.ItemDataRole.ToolTipRole)
         form.addRow("Modelo:", self.cb_model)
-
+        lv.addLayout(form)
+        lv.addSpacing(8)
         self.ck_diar = QCheckBox("Identificar quem está falando")
         self.ck_diar.toggled.connect(self._sync_enabled)
-        form.addRow("Falantes:", self.ck_diar)
+        lv.addWidget(self.ck_diar)
 
+        lv.addSpacing(10)
+        self.btn_more = QToolButton()
+        self.btn_more.setObjectName("disclosure")
+        self.btn_more.setText("Mais opções")
+        self.btn_more.setCheckable(True)
+        self.btn_more.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        lv.addWidget(self.btn_more)
+        self.more = QWidget()
+        mf = QFormLayout(self.more)
+        mf.setContentsMargins(0, 8, 0, 0)
+        mf.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        mf.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        mf.setHorizontalSpacing(10)
+        mf.setVerticalSpacing(8)
         self.sp_speakers = QSpinBox()
         self.sp_speakers.setRange(0, 20)
         self.sp_speakers.setSpecialValueText("Automático")
         self.sp_speakers.valueChanged.connect(self._sync_enabled)
-        form.addRow("Nº de falantes:", self.sp_speakers)
-
-        sens = QHBoxLayout()
-        sens.addWidget(QLabel("menos"))
+        mf.addRow("Falantes:", self.sp_speakers)
         self.sl_sens = QSlider(Qt.Orientation.Horizontal)
         self.sl_sens.setRange(0, 10)       # 0 → limiar 0,60 · 10 → limiar 0,30
-        self.sl_sens.setToolTip("Aumente se vozes diferentes estiverem sendo juntadas;\n"
-                                "diminua se a mesma pessoa aparecer como vários falantes.")
-        sens.addWidget(self.sl_sens, 1)
-        sens.addWidget(QLabel("mais"))
-        self.lbl_sens = QLabel("Separação de vozes:")
-        form.addRow(self.lbl_sens, sens)
-
+        self.sl_sens.setToolTip("Para a direita se vozes diferentes estiverem sendo juntadas;\n"
+                                "para a esquerda se a mesma pessoa aparecer como vários falantes.")
+        self.lbl_sens = QLabel("Separação:")
+        mf.addRow(self.lbl_sens, self.sl_sens)
         self.ed_hot = QLineEdit()
-        self.ed_hot.setPlaceholderText("Opcional: nomes próprios, siglas, termos técnicos…")
-        form.addRow("Vocabulário:", self.ed_hot)
-
+        self.ed_hot.setPlaceholderText("Nomes, siglas, termos técnicos")
+        self.ed_hot.setToolTip("Opcional. Palavras que o modelo deve reconhecer, separadas por vírgula.")
+        mf.addRow("Vocabulário:", self.ed_hot)
         out = QHBoxLayout()
+        out.setSpacing(6)
         self.ed_out = QLineEdit()
         self.ed_out.setPlaceholderText("Mesma pasta do vídeo")
         self.ed_out.setClearButtonEnabled(True)
-        b = QPushButton("…")
-        b.setFixedWidth(36)
+        b = QPushButton("Escolher…")
         b.clicked.connect(self.choose_out_dir)
         out.addWidget(self.ed_out, 1)
         out.addWidget(b)
-        form.addRow("Salvar em:", out)
-
-        fmts = QVBoxLayout()
+        mf.addRow("Salvar em:", out)
         self.ck_fmt: dict[str, QCheckBox] = {}
         for k, v in export.FORMATS.items():
-            c = QCheckBox(v)
+            c = QCheckBox(FORMAT_SHORT.get(k, k))
+            c.setToolTip(v)
             self.ck_fmt[k] = c
-            fmts.addWidget(c)
-        form.addRow("Formatos:", fmts)
-        lv.addWidget(box)
+        mf.addRow("Formatos:", _flow(*self.ck_fmt.values(), spacing=10))
+        lv.addWidget(self.more)
+        self.btn_more.toggled.connect(self._toggle_more)
 
-        row = QHBoxLayout()
-        self.btn_start = QPushButton("Transcrever")
-        self.btn_start.setDefault(True)
-        self.btn_start.setMinimumHeight(34)
-        self.btn_start.clicked.connect(self.start)
-        self.btn_cancel = QPushButton("Cancelar")
-        self.btn_cancel.setMinimumHeight(34)
-        self.btn_cancel.setEnabled(False)
-        self.btn_cancel.clicked.connect(self.stop)
-        row.addWidget(self.btn_start, 2)
-        row.addWidget(self.btn_cancel, 1)
-        lv.addLayout(row)
+        scroll = QScrollArea()
+        scroll.setObjectName("sideScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(inner)
+        scroll.viewport().setAutoFillBackground(False)
 
+        # Rodapé fixo: a ação principal fica sempre à vista, mesmo com a barra rolada.
+        footer = QWidget()
+        footer.setObjectName("footer")
+        fv = QVBoxLayout(footer)
+        fv.setContentsMargins(16, 12, 16, 14)
+        fv.setSpacing(8)
         self.status = QLabel("Pronto.")
+        self.status.setProperty("role", "secondary")
         self.status.setWordWrap(True)
         self.bar = QProgressBar()
+        self.bar.setObjectName("bar")
         self.bar.setRange(0, 1000)
         self.bar.setTextVisible(False)
-        lv.addWidget(self.status)
-        lv.addWidget(self.bar)
+        self.bar.hide()
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.btn_start = QPushButton("Transcrever")
+        self.btn_start.setObjectName("primary")
+        self.btn_start.setToolTip("Transcrever os arquivos da lista (⌘↩)")
+        self.btn_start.clicked.connect(self.start)
+        self.btn_cancel = QPushButton("Cancelar")
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.clicked.connect(self.stop)
+        row.addWidget(self.btn_start, 1)
+        row.addWidget(self.btn_cancel)
+        fv.addWidget(self.status)
+        fv.addWidget(self.bar)
+        fv.addLayout(row)
 
-        # Painel direito
-        right = QWidget()
-        rv = QVBoxLayout(right)
-        rv.setContentsMargins(6, 12, 12, 12)
+        self.sidebar = QWidget()
+        self.sidebar.setObjectName("sidebar")
+        self.sidebar.setMinimumWidth(300)
+        self.sidebar.setMaximumWidth(440)
+        sv = QVBoxLayout(self.sidebar)
+        sv.setContentsMargins(0, 0, 0, 0)
+        sv.setSpacing(0)
+        sv.addWidget(scroll, 1)
+        sv.addWidget(footer)
+
+        # Conteúdo: a transcrição selecionada.
+        content = QWidget()
+        content.setObjectName("content")
+        cv = QVBoxLayout(content)
+        cv.setContentsMargins(0, 0, 0, 0)
+        cv.setSpacing(0)
         self.tabs = QTabWidget()
+        self.btn_side = _tool("sidebar", "Mostrar ou esconder a barra lateral (⌘⌥S)")
+        self.btn_side.clicked.connect(self.toggle_sidebar)
+        self.tabs.setCornerWidget(self.btn_side, Qt.Corner.TopLeftCorner)
+
+        self.result = QStackedWidget()
+        self.empty = EmptyState()
+        self.empty.filesDropped.connect(self.add_files)
+        self.result.addWidget(self.empty)
 
         view = QWidget()
         vv = QVBoxLayout(view)
-        vv.setContentsMargins(0, 6, 0, 0)
-        self.lbl_title = QLabel("Selecione um arquivo transcrito para ver o resultado.")
+        vv.setContentsMargins(24, 18, 24, 0)
+        vv.setSpacing(4)
+        header = Responsive(breakpoint=620)
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        self.lbl_title = QLabel()
+        self.lbl_title.setObjectName("title")
         self.lbl_title.setWordWrap(True)
-        vv.addWidget(self.lbl_title)
-        self.text = QTextBrowser()
-        self.text.setOpenExternalLinks(False)
-        vv.addWidget(self.text, 1)
-
-        self.tbl = QTableWidget(0, 2)
-        self.tbl.setHorizontalHeaderLabels(["Falante", "Nome (edite para renomear)"])
-        self.tbl.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.tbl.verticalHeader().setVisible(False)
-        self.tbl.setMaximumHeight(150)
-        self.tbl.itemChanged.connect(self._rename_changed)
-        vv.addWidget(self.tbl)
-
-        row = QHBoxLayout()
-        self.btn_resave = QPushButton("Salvar arquivos novamente")
-        self.btn_resave.clicked.connect(self.resave)
-        self.btn_open = QPushButton("Abrir pasta")
-        self.btn_open.clicked.connect(self.open_folder)
+        self.lbl_title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.lbl_meta = QLabel()
+        self.lbl_meta.setProperty("role", "secondary")
+        titles.addWidget(self.lbl_title)
+        titles.addWidget(self.lbl_meta)
+        header.box.addLayout(titles, 1)
+        actions = QHBoxLayout()
+        actions.setSpacing(6)
         self.btn_copy = QPushButton("Copiar texto")
         self.btn_copy.clicked.connect(self.copy_text)
-        row.addWidget(self.btn_copy)
-        row.addStretch(1)
-        row.addWidget(self.btn_resave)
-        row.addWidget(self.btn_open)
-        vv.addLayout(row)
-        self.tabs.addTab(view, "Transcrição")
+        self.btn_open = QPushButton("Abrir pasta")
+        self.btn_open.clicked.connect(self.open_folder)
+        self.btn_resave = QPushButton("Salvar de novo")
+        self.btn_resave.setToolTip("Grava os arquivos outra vez, com os nomes dos falantes atualizados")
+        self.btn_resave.clicked.connect(self.resave)
+        for w in (self.btn_copy, self.btn_open, self.btn_resave):
+            actions.addWidget(w)
+        actions.addStretch(1)
+        header.box.addLayout(actions)
+        vv.addWidget(header)
+
+        self.speakers_box = QWidget()
+        sb = QVBoxLayout(self.speakers_box)
+        sb.setContentsMargins(0, 14, 0, 4)
+        sb.setSpacing(6)
+        hint = QLabel("Nomes dos falantes")
+        hint.setProperty("role", "secondary")
+        sb.addWidget(hint)
+        self.speakers = SpeakerEditor()
+        self.speakers.renamed.connect(self._rename_changed)
+        sb.addWidget(self.speakers)
+        vv.addWidget(self.speakers_box)
+        vv.addSpacing(10)
+        vv.addWidget(_divider())
+
+        self.text = TranscriptView()
+        vv.addWidget(self.text, 1)
+        vv.setStretch(vv.indexOf(self.text), 1)
+        self.result.addWidget(view)
+        self.tabs.addTab(self.result, "Transcrição")
 
         self.logbox = QPlainTextEdit()
+        self.logbox.setObjectName("log")
         self.logbox.setReadOnly(True)
         self.logbox.setMaximumBlockCount(5000)
+        self.logbox.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
         self.tabs.addTab(self.logbox, "Registro")
-        rv.addWidget(self.tabs)
+        cv.addWidget(self.tabs)
 
-        split = QSplitter()
-        split.addWidget(left)
-        split.addWidget(right)
-        split.setStretchFactor(0, 0)
-        split.setStretchFactor(1, 1)
-        split.setSizes([420, 760])
-        self.setCentralWidget(split)
-        self._set_result_enabled(False)
+        self.split = QSplitter()
+        self.split.setChildrenCollapsible(False)
+        self.split.setHandleWidth(1)
+        self.split.addWidget(self.sidebar)
+        self.split.addWidget(content)
+        self.split.setStretchFactor(0, 0)
+        self.split.setStretchFactor(1, 1)
+        self.split.setSizes([340, 900])
+        self.setCentralWidget(self.split)
+        self.user_hid_sidebar = False
+        self._rerender = widgets.debounce(self, 200, lambda: self.text.show_transcript(self._shown))
+        self._shown: Optional[Transcript] = None
+
+        QShortcut(QKeySequence.StandardKey.Open, self, self.choose_files)
+        QShortcut(QKeySequence("Ctrl+Return"), self, self.start)
+        QShortcut(QKeySequence("Ctrl+Alt+S"), self, self.toggle_sidebar)
+        for key in (QKeySequence.StandardKey.Delete, QKeySequence(Qt.Key.Key_Backspace)):
+            QShortcut(key, self.list, self.remove_selected, context=Qt.ShortcutContext.WidgetShortcut)
+
+        QGuiApplication.styleHints().colorSchemeChanged.connect(lambda _: self._apply_theme())
+        self._apply_theme()
+        self.show_row(-1)
+
+    def _apply_theme(self) -> None:
+        t = style.tokens()
+        self.setStyleSheet(style.stylesheet(t))
+        ink = self.palette().color(QPalette.ColorRole.WindowText)
+        self.btn_add.setIcon(style.icon("plus", ink))
+        self.btn_remove.setIcon(style.icon("minus", ink))
+        self.btn_side.setIcon(style.icon("sidebar", ink, 18))
+        self.btn_copy.setIcon(style.icon("copy", ink))
+        self.btn_open.setIcon(style.icon("folder", ink))
+        self.btn_resave.setIcon(style.icon("save", ink))
+        self._set_rec_icon()
+        self._toggle_more(self.btn_more.isChecked())
+        self.list.viewport().update()
+        if self._shown is not None:
+            self.speakers.set_speakers(self._shown.speaker_names)
+            self.text.show_transcript(self._shown)
+
+    def _set_rec_icon(self) -> None:
+        live = self.rec is not None
+        self.btn_rec.setIcon(style.icon("stop" if live else "record", style.tokens().rec, 14))
+
+    def _toggle_more(self, on: bool) -> None:
+        ink = self.palette().color(QPalette.ColorRole.WindowText)
+        self.btn_more.setIcon(style.icon("chev-down" if on else "chev-right", ink, 14))
+        self.more.setVisible(on)
+
+    # Abaixo desta largura a barra lateral sai da frente e volta pelo botão.
+    COMPACT = 900
+
+    def toggle_sidebar(self) -> None:
+        show = not self.sidebar.isVisible()
+        self.sidebar.setVisible(show)
+        if self.width() >= self.COMPACT:
+            self.user_hid_sidebar = not show
+
+    def resizeEvent(self, e) -> None:
+        super().resizeEvent(e)
+        compact = e.size().width() < self.COMPACT
+        was = e.oldSize().width() < self.COMPACT if e.oldSize().width() > 0 else None
+        if compact != was:
+            self.sidebar.setVisible(not compact and not self.user_hid_sidebar)
 
     def _sync_enabled(self) -> None:
         on = self.ck_diar.isChecked()
@@ -432,7 +684,7 @@ class MainWindow(QMainWindow):
         self.lbl_sens.setEnabled(auto)
 
     def _set_result_enabled(self, on: bool) -> None:
-        for w in (self.btn_resave, self.btn_open, self.btn_copy, self.tbl):
+        for w in (self.btn_resave, self.btn_open, self.btn_copy):
             w.setEnabled(on)
 
     # ------------------------------------------------------------ settings
@@ -452,6 +704,12 @@ class MainWindow(QMainWindow):
         self.ck_rec_video.setChecked(s.value("rec_video", True, type=bool))
         self.ck_rec_sys.setChecked(s.value("rec_system", True, type=bool))
         self.ck_rec_mic.setChecked(s.value("rec_mic", True, type=bool))
+        more = s.value("more_options", False, type=bool)
+        self.btn_more.setChecked(more)
+        self._toggle_more(more)
+        if not self.restoreGeometry(s.value("geometry", b"")):
+            screen = QGuiApplication.primaryScreen().availableGeometry()
+            self.resize(min(1240, screen.width() - 80), min(820, screen.height() - 60))
         self._sync_enabled()
 
     def _save_settings(self) -> None:
@@ -468,6 +726,8 @@ class MainWindow(QMainWindow):
         s.setValue("rec_video", self.ck_rec_video.isChecked())
         s.setValue("rec_system", self.ck_rec_sys.isChecked())
         s.setValue("rec_mic", self.ck_rec_mic.isChecked())
+        s.setValue("more_options", self.btn_more.isChecked())
+        s.setValue("geometry", self.saveGeometry())
 
     @staticmethod
     def _set_combo(cb: QComboBox, data) -> None:
@@ -508,13 +768,15 @@ class MainWindow(QMainWindow):
             item.setToolTip(p)
             self.list.addItem(item)
             self._refresh_item(len(self.files) - 1)
+        self.empty.set_state(has_files=bool(self.files))
 
-    def _refresh_item(self, row: int, extra: str = "") -> None:
+    def _refresh_item(self, row: int, extra: str = "", frac: float = 0.0) -> None:
         f = self.files[row]
-        text = f"{STATUS[f['status']]}  {Path(f['path']).name}"
-        if extra:
-            text += f"  —  {extra}"
-        self.list.item(row).setText(text)
+        item = self.list.item(row)
+        item.setText(Path(f["path"]).name)
+        item.setData(STATUS_ROLE, f["status"])
+        item.setData(META_ROLE, extra or STATUS_TEXT[f["status"]])
+        item.setData(FRAC_ROLE, frac)
 
     def remove_selected(self) -> None:
         if self.thread:
@@ -719,6 +981,13 @@ class MainWindow(QMainWindow):
 
         threading.Thread(target=run, daemon=True).start()
 
+    def _set_rec_live(self, live: bool) -> None:
+        self.rec_panel.setProperty("live", live)
+        self.rec_panel.layout().setContentsMargins(*((10, 8, 10, 10) if live else (0, 0, 0, 0)))
+        self.rec_panel.style().unpolish(self.rec_panel)
+        self.rec_panel.style().polish(self.rec_panel)
+        self._set_rec_icon()
+
     def _set_rec_busy(self, text: str) -> None:
         self.rec_busy = True
         self.btn_rec.setEnabled(False)
@@ -729,9 +998,10 @@ class MainWindow(QMainWindow):
     def _rec_idle(self) -> None:
         self.rec_busy = False
         self.btn_rec.setEnabled(True)
-        self.btn_rec.setText("●  Gravar")
-        self.btn_rec.setStyleSheet("")
+        self.btn_rec.setText("Gravar")
         self.lbl_rec.setText("")
+        self.lbl_rec_warn.hide()
+        self._set_rec_live(False)
         self.setWindowTitle("Transcritor")
         for w in (self.ck_rec_video, self.ck_rec_sys, self.ck_rec_mic, self.cb_display):
             w.setEnabled(True)
@@ -745,8 +1015,8 @@ class MainWindow(QMainWindow):
         self.rec_t0 = time.monotonic()
         self.rec_warned = False
         self.btn_rec.setEnabled(True)
-        self.btn_rec.setText("■  Parar e transcrever")
-        self.btn_rec.setStyleSheet("QPushButton { color: #c62828; font-weight: bold; }")
+        self.btn_rec.setText("Parar e transcrever")
+        self._set_rec_live(True)
         self.rec_timer.start(500)
         self._rec_tick()
         self.append_log("— Gravação iniciada.")
@@ -777,14 +1047,13 @@ class MainWindow(QMainWindow):
             return
         t = int(time.monotonic() - self.rec_t0)
         txt = f"{t // 3600:02d}:{t % 3600 // 60:02d}:{t % 60:02d}"
-        warn = ""
-        if self.rec.stalled():
-            warn = " <b style='color:#c62828'>⚠ sem dados: pare e grave de novo</b>"
-            if not self.rec_warned:
-                self.rec_warned = True
-                self.append_log("Aviso: a gravação parou de receber áudio/vídeo do sistema.")
-        self.lbl_rec.setText(f"<span style='color:#c62828'>●</span> {txt}{warn}")
-        self.setWindowTitle(f"● Gravando {txt} — Transcritor")
+        stalled = self.rec.stalled()
+        self.lbl_rec_warn.setVisible(stalled)
+        if stalled and not self.rec_warned:
+            self.rec_warned = True
+            self.append_log("Aviso: a gravação parou de receber áudio/vídeo do sistema.")
+        self.lbl_rec.setText(txt)
+        self.setWindowTitle(f"Gravando {txt} · Transcritor")
         if self.tray:
             self.tray.setToolTip(f"Transcritor: gravando ({txt})")
 
@@ -812,6 +1081,7 @@ class MainWindow(QMainWindow):
     def _running(self, on: bool) -> None:
         self.btn_start.setEnabled(not on)
         self.btn_cancel.setEnabled(on)
+        self.bar.setVisible(on)
         for w in (self.btn_add, self.btn_remove, self.btn_clear, self.cb_lang, self.cb_model,
                   self.ck_diar, self.sp_speakers, self.sl_sens, self.ed_hot, self.ed_out,
                   self.ed_url, self.btn_dl, self.btn_login, self.ck_video, self.ck_auto,
@@ -823,9 +1093,8 @@ class MainWindow(QMainWindow):
     @Slot(int, str, float)
     def on_progress(self, row: int, msg: str, frac: float) -> None:
         f = self.files[row]
-        if f["status"] != "running":
-            f["status"] = "running"
-            self._refresh_item(row)
+        f["status"] = "running"
+        self._refresh_item(row, msg, frac)
         name = Path(f["path"]).name
         self.status.setText(f"{name}: {msg}")
         if frac < 0:
@@ -838,10 +1107,7 @@ class MainWindow(QMainWindow):
     def on_done(self, row: int, tr: Transcript, outputs: list) -> None:
         f = self.files[row]
         f.update(status="done", transcript=tr, outputs=outputs)
-        extra = fmt_time(tr.duration)
-        if tr.diarized:
-            extra += f" · {len(tr.speaker_names)} falante(s)"
-        self._refresh_item(row, extra)
+        self._refresh_item(row, self._summary(tr))
         if self.list.currentRow() in (row, -1):
             self.list.setCurrentRow(row)
             self.show_row(row)
@@ -850,7 +1116,7 @@ class MainWindow(QMainWindow):
     def on_failed(self, row: int, msg: str) -> None:
         cancelled = msg == "Cancelado"
         self.files[row]["status"] = "cancelled" if cancelled else "error"
-        self._refresh_item(row, msg if cancelled else "erro (veja o Registro)")
+        self._refresh_item(row)
         if not cancelled:
             self.append_log(f"Erro em {Path(self.files[row]['path']).name}: {msg}")
 
@@ -867,7 +1133,7 @@ class MainWindow(QMainWindow):
         self.bar.setValue(1000 if done and not errors else 0)
         msg = f"Concluído: {done} transcrito(s)."
         if errors:
-            msg += f" {errors} com erro — veja a aba Registro."
+            msg += f" {errors} com erro: veja a aba Registro."
             self.tabs.setCurrentIndex(1)
         if self.cancel.is_set():
             msg = "Cancelado."
@@ -887,54 +1153,37 @@ class MainWindow(QMainWindow):
     def show_row(self, row: int) -> None:
         self.current_row = row
         tr = self.files[row]["transcript"] if 0 <= row < len(self.files) else None
-        self.tbl.blockSignals(True)
-        self.tbl.setRowCount(0)
+        self._shown = tr
+        self.empty.set_state(has_files=bool(self.files))
+        self._set_result_enabled(tr is not None)
         if tr is None:
-            self.lbl_title.setText("Selecione um arquivo transcrito para ver o resultado.")
-            self.text.clear()
-            self._set_result_enabled(False)
-            self.tbl.blockSignals(False)
+            self.result.setCurrentIndex(0)
+            self.text.show_transcript(None)
             return
-        self._set_result_enabled(True)
-        lang = export.LANG_NAMES.get(tr.language, tr.language)
-        self.lbl_title.setText(f"<b>{html.escape(Path(tr.source).name)}</b> · {fmt_time(tr.duration)} · {lang}")
-        for spk, name in sorted(tr.speaker_names.items()):
-            r = self.tbl.rowCount()
-            self.tbl.insertRow(r)
-            a = QTableWidgetItem(f"Falante {spk + 1}")
-            a.setFlags(a.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            a.setForeground(Qt.GlobalColor.white)
-            a.setBackground(self._color(spk))
-            a.setData(Qt.ItemDataRole.UserRole, spk)
-            self.tbl.setItem(r, 0, a)
-            self.tbl.setItem(r, 1, QTableWidgetItem(name))
-        self.tbl.setVisible(tr.diarized)
-        self.tbl.blockSignals(False)
-        self.render(tr)
+        self.result.setCurrentIndex(1)
+        self.lbl_title.setText(Path(tr.source).stem)
+        self.lbl_meta.setText(self._summary(tr, with_lang=True))
+        self.speakers_box.setVisible(tr.diarized)
+        self.speakers.set_speakers(tr.speaker_names)
+        self.text.verticalScrollBar().setValue(0)
+        self.text.show_transcript(tr)
 
     @staticmethod
-    def _color(spk: int):
-        from PySide6.QtGui import QColor
-        return QColor(SPEAKER_COLORS[spk % len(SPEAKER_COLORS)])
+    def _summary(tr: Transcript, with_lang: bool = False) -> str:
+        parts = [fmt_time(tr.duration)]
+        if with_lang:
+            parts.append(export.LANG_NAMES.get(tr.language, tr.language))
+        if tr.diarized:
+            n = len(tr.speaker_names)
+            parts.append(f"{n} falante" + ("s" if n != 1 else ""))
+        return ", ".join(parts)
 
-    def render(self, tr: Transcript) -> None:
-        parts = []
-        for u in tr.utterances:
-            ts = f'<span style="color:#888">[{fmt_time(u.start)}]</span> '
-            who = ""
-            if tr.diarized and u.speaker is not None:
-                color = SPEAKER_COLORS[u.speaker % len(SPEAKER_COLORS)]
-                who = f'<b style="color:{color}">{html.escape(tr.speaker_label(u.speaker))}:</b> '
-            parts.append(f'<p style="margin:0 0 10px 0">{ts}{who}{html.escape(u.text)}</p>')
-        self.text.setHtml("".join(parts))
-
-    def _rename_changed(self, item: QTableWidgetItem) -> None:
-        if item.column() != 1 or self.current_row < 0:
+    def _rename_changed(self, spk: int, name: str) -> None:
+        tr = self._shown
+        if tr is None:
             return
-        tr: Transcript = self.files[self.current_row]["transcript"]
-        spk = self.tbl.item(item.row(), 0).data(Qt.ItemDataRole.UserRole)
-        tr.speaker_names[spk] = item.text().strip() or f"Falante {spk + 1}"
-        self.render(tr)
+        tr.speaker_names[spk] = name.strip() or f"Falante {spk + 1}"
+        self._rerender.start()
 
     def _current(self):
         if 0 <= self.current_row < len(self.files):
