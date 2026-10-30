@@ -30,7 +30,9 @@ if sys.platform == "darwin":
     hiddenimports += ["objc", "Foundation", "AppKit", "Quartz", "CoreMedia", "AVFoundation",
                       "ScreenCaptureKit", "dispatch"]
     # Whisper na GPU (MLX): biblioteca nativa, shaders Metal e os arquivos do tokenizador
-    hiddenimports += collect_submodules("mlx") + collect_submodules("mlx_whisper") + \
+    hiddenimports += collect_submodules("mlx") + \
+        [f"mlx_whisper.{m}" for m in ("audio", "decoding", "load_models", "timing", "tokenizer",
+                                      "transcribe", "whisper")] + ["mlx_whisper"] + \
         ["tiktoken", "tiktoken_ext", "tiktoken_ext.openai_public", "more_itertools"]
     binaries += collect_dynamic_libs("mlx")
     datas += collect_data_files("mlx", includes=["**/*.metallib"]) + collect_data_files("mlx_whisper")
