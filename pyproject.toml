@@ -1,6 +1,6 @@
 [project]
 name = "transcritor"
-version = "1.4.0"
+version = "1.5.0"
 description = "Transcrição de vídeos com identificação de falantes, usando modelos de IA gratuitos e locais."
 requires-python = ">=3.10,<3.14"
 dependencies = [
@@ -18,6 +18,11 @@ dependencies = [
     "pyobjc-framework-ScreenCaptureKit>=11; sys_platform == 'darwin'",
     "pyobjc-framework-AVFoundation>=11; sys_platform == 'darwin'",
     "pyobjc-framework-libdispatch>=11; sys_platform == 'darwin'",
+    # Whisper na GPU dos Macs com Apple Silicon. O mlx-whisper é instalado à parte, sem as
+    # dependências (torch, numba, scipy), que ele só usa para converter modelos.
+    "mlx>=0.25; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "tiktoken>=0.7; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "more-itertools>=10; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "soundcard>=0.4.6; sys_platform == 'win32'",
     "mss>=10; sys_platform == 'win32'",
 ]

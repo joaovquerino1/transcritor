@@ -480,6 +480,9 @@ class MainWindow(QMainWindow):
         for m in models.WHISPER_MODELS:
             self.cb_model.addItem(f"{m.label} · {m.approx_mb / 1000:.1f} GB", m.key)
             self.cb_model.setItemData(self.cb_model.count() - 1, m.label, Qt.ItemDataRole.ToolTipRole)
+        self.cb_model.setToolTip("Nos Macs com Apple Silicon, os modelos Whisper rodam na GPU.\n"
+                                 "O Parakeet é o mais rápido e reconhece o idioma sozinho.")
+        self.cb_model.currentIndexChanged.connect(self._sync_enabled)
         form.addRow("Modelo:", self.cb_model)
         lv.addLayout(form)
         lv.addSpacing(8)
@@ -743,6 +746,8 @@ class MainWindow(QMainWindow):
             self.sidebar.setVisible(not compact and not self.user_hid_sidebar)
 
     def _sync_enabled(self) -> None:
+        # O Parakeet reconhece o idioma sozinho (25 idiomas europeus).
+        self.cb_lang.setEnabled(self.cb_model.currentData() != "parakeet" and self.btn_start.isEnabled())
         on = self.ck_diar.isChecked()
         self.sp_speakers.setEnabled(on)
         auto = on and self.sp_speakers.value() == 0

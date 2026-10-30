@@ -11,7 +11,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from . import models
+from . import asr, models
 
 SAMPLE_RATE = 16000
 
@@ -156,9 +156,6 @@ class Engine:
             if cancel.is_set():
                 raise InterruptedError
 
-        model = self._load_whisper(opts.model, progress, log, cancel)
-        check()
-
         progress("Extraindo áudio do vídeo…", -1)
         audio = load_audio(path)
         duration = len(audio) / SAMPLE_RATE
@@ -170,33 +167,30 @@ class Engine:
         # Pesos de progresso: transcrição 75%, diarização 25%.
         w_tr = 0.75 if opts.diarize else 1.0
 
-        language, multilingual, prompt = self._resolve_language(model, audio, opts, log)
-        check()
+        def tr_progress(frac: float) -> None:
+            progress(f"Transcrevendo… {fmt_time(frac * duration)} / {fmt_time(duration)}", frac * w_tr)
 
-        progress("Transcrevendo…", 0.0)
-        segments, info = model.transcribe(
-            audio,
-            language=language,
-            multilingual=multilingual,
-            initial_prompt=prompt,
-            hotwords=opts.hotwords.strip() or None,
-            beam_size=5,
-            word_timestamps=True,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 300},
-            condition_on_previous_text=False,
-            hallucination_silence_threshold=2.0,
-        )
-        words: list[Word] = []
-        for seg in segments:
+        words: Optional[list[Word]] = None
+        detected = opts.language if opts.language in PROMPTS else None
+        if opts.model == "parakeet":
+            progress("Carregando o modelo Parakeet…", -1)
+            model = asr.parakeet(lambda f, m: progress(m, f), cancel)
+            log("Modelo Parakeet carregado (CPU, int8). Idioma reconhecido automaticamente.")
+            tr_progress(0.0)
+            words = [Word(*w) for w in model.words(audio, tr_progress, cancel)]
+            detected = detected or "auto"
+        elif asr.mlx_available():
+            try:
+                words, detected = self._run_mlx(audio, opts, progress, tr_progress, log, cancel)
+            except InterruptedError:
+                raise
+            except Exception as e:  # noqa: BLE001  GPU indisponível: segue no processador
+                log(f"Não foi possível usar a GPU ({e}). Transcrevendo no processador.")
+                words = None
+        if words is None:
+            model = self._load_whisper(opts.model, progress, log, cancel)
             check()
-            if seg.words:
-                words.extend(Word(w.start, w.end, w.word) for w in seg.words)
-            elif seg.text.strip():
-                words.append(Word(seg.start, seg.end, seg.text))
-            frac = min(seg.end / duration, 1.0)
-            progress(f"Transcrevendo… {fmt_time(seg.end)} / {fmt_time(duration)}", frac * w_tr)
-        detected = language or info.language
+            words, detected = self._run_ct2(model, audio, opts, tr_progress, log, check)
         log(f"Transcrição concluída: {len(words)} palavras.")
 
         speaker_names: dict[int, str] = {}
@@ -233,6 +227,54 @@ class Engine:
             speaker_names=speaker_names,
             diarized=bool(speaker_names),
         )
+
+    def _run_ct2(self, model, audio, opts: Options, tr_progress, log: LogFn, check):
+        """Whisper no processador (ou GPU NVIDIA) com o faster-whisper."""
+        duration = len(audio) / SAMPLE_RATE
+        language, multilingual, prompt = self._resolve_language(model, audio, opts, log)
+        check()
+        tr_progress(0.0)
+        segments, info = model.transcribe(
+            audio,
+            language=language,
+            multilingual=multilingual,
+            initial_prompt=prompt,
+            hotwords=opts.hotwords.strip() or None,
+            beam_size=5,
+            word_timestamps=True,
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 300},
+            condition_on_previous_text=False,
+            hallucination_silence_threshold=2.0,
+        )
+        words: list[Word] = []
+        for seg in segments:
+            check()
+            if seg.words:
+                words.extend(Word(w.start, w.end, w.word) for w in seg.words)
+            elif seg.text.strip():
+                words.append(Word(seg.start, seg.end, seg.text))
+            tr_progress(min(seg.end / duration, 1.0))
+        return words, language or info.language
+
+    def _run_mlx(self, audio, opts: Options, progress: ProgressFn, tr_progress, log: LogFn,
+                 cancel: threading.Event):
+        """Whisper na GPU do Mac (MLX): mesma precisão, cerca de 4x mais rápido."""
+        path = models.ensure_mlx_whisper(opts.model, lambda f, m: progress(m, f), cancel)
+        log(f"Modelo {opts.model} na GPU do Mac (MLX).")
+        mixed = opts.language == "mixed"
+        language = opts.language if opts.language in PROMPTS else None
+        prompt = PROMPTS.get(language) if language else None
+        if opts.hotwords.strip():
+            prompt = f"{prompt or ''} {opts.hotwords.strip()}".strip()
+        if mixed:
+            log("Modo misto: idioma detectado a cada trecho.")
+        tr_progress(0.0)
+        raw, detected = asr.mlx_transcribe(audio, path, language, prompt, tr_progress, cancel,
+                                           per_window_language=mixed)
+        if opts.language == "auto" and detected:
+            log(f"Idioma detectado: {detected}.")
+        return [Word(*w) for w in raw], detected or ("pt" if mixed else None)
 
     def _resolve_language(self, model, audio, opts: Options, log: LogFn):
         if opts.language == "mixed":

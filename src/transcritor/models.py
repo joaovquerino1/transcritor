@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tarfile
 import threading
@@ -41,19 +42,25 @@ class WhisperChoice:
     label: str
     repo_id: str
     approx_mb: int
+    mlx_repo: str = ""        # mesma rede em formato MLX, para a GPU dos Macs com Apple Silicon
 
 
 # Modelos Whisper convertidos para CTranslate2 (faster-whisper), hospedados no Hugging Face.
 WHISPER_MODELS: list[WhisperChoice] = [
     WhisperChoice("large-v3-turbo", "Equilibrado – Whisper large-v3 turbo (recomendado)",
-                  "mobiuslabsgmbh/faster-whisper-large-v3-turbo", 1600),
+                  "mobiuslabsgmbh/faster-whisper-large-v3-turbo", 1600,
+                  "mlx-community/whisper-large-v3-turbo"),
     WhisperChoice("large-v3", "Máxima precisão – Whisper large-v3 (mais lento)",
-                  "Systran/faster-whisper-large-v3", 3100),
+                  "Systran/faster-whisper-large-v3", 3100, "mlx-community/whisper-large-v3-mlx"),
     WhisperChoice("medium", "Intermediário – Whisper medium",
-                  "Systran/faster-whisper-medium", 1500),
+                  "Systran/faster-whisper-medium", 1500, "mlx-community/whisper-medium-mlx"),
     WhisperChoice("small", "Rápido – Whisper small (menos preciso)",
-                  "Systran/faster-whisper-small", 480),
+                  "Systran/faster-whisper-small", 480, "mlx-community/whisper-small-mlx"),
+    WhisperChoice("parakeet", "Ultrarrápido – NVIDIA Parakeet (um pouco menos preciso)", "", 490),
 ]
+
+PARAKEET_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+                "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2")
 
 _WHISPER_FILES = ["config.json", "preprocessor_config.json", "model.bin",
                   "tokenizer.json", "vocabulary.json", "vocabulary.txt"]
@@ -114,6 +121,65 @@ def ensure_whisper(key: str, progress: Optional[ProgressFn] = None,
     if cancel is not None and cancel.is_set():
         raise InterruptedError
     marker.write_text("ok")
+    return str(target)
+
+
+def ensure_mlx_whisper(key: str, progress: Optional[ProgressFn] = None,
+                       cancel: Optional[threading.Event] = None) -> str:
+    """Versão MLX (GPU do Mac) do modelo Whisper. Retorna a pasta local."""
+    choice = whisper_choice(key)
+    target = models_dir() / "whisper-mlx" / choice.key
+    marker = target / ".complete"
+    if marker.exists():
+        return str(target)
+
+    from huggingface_hub import snapshot_download
+
+    target.mkdir(parents=True, exist_ok=True)
+    expected = choice.approx_mb * 1024 * 1024
+    done = threading.Event()
+
+    def monitor():
+        while not done.wait(0.5):
+            if progress:
+                frac = min(_dir_size(target) / expected, 0.99)
+                progress(frac, f"Baixando modelo {choice.key} para a GPU ({frac * 100:.0f}%)…")
+
+    t = threading.Thread(target=monitor, daemon=True)
+    t.start()
+    try:
+        snapshot_download(choice.mlx_repo, local_dir=str(target),
+                          allow_patterns=["config.json", "weights.npz", "weights.safetensors"])
+    finally:
+        done.set()
+        t.join()
+    if cancel is not None and cancel.is_set():
+        raise InterruptedError
+    marker.write_text("ok")
+    return str(target)
+
+
+def ensure_parakeet(progress: Optional[ProgressFn] = None,
+                    cancel: Optional[threading.Event] = None) -> str:
+    """NVIDIA Parakeet TDT 0.6B v3 (int8, sherpa-onnx). Retorna a pasta local."""
+    base = models_dir() / "parakeet"
+    target = base / "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
+    if (target / "tokens.txt").exists() and (target / "encoder.int8.onnx").exists():
+        return str(target)
+    base.mkdir(parents=True, exist_ok=True)
+    archive = base / "parakeet.tar.bz2"
+    _download(PARAKEET_URL, archive, "modelo Parakeet", progress, cancel)
+    if progress:
+        progress(-1, "Preparando o modelo Parakeet…")
+    tmp = base / ".extraindo"
+    shutil.rmtree(tmp, ignore_errors=True)
+    with tarfile.open(archive, "r:bz2") as tar:      # extrai à parte: interrompido, não fica pela metade
+        members = [m for m in tar.getmembers() if "/test_wavs" not in m.name]
+        tar.extractall(tmp, members=members, filter="data")
+    shutil.rmtree(target, ignore_errors=True)
+    (tmp / target.name).replace(target)
+    shutil.rmtree(tmp, ignore_errors=True)
+    archive.unlink(missing_ok=True)
     return str(target)
 
 

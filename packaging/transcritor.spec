@@ -29,6 +29,11 @@ hiddenimports += ["brotli", "certifi", "mutagen", "Cryptodome", "websockets", "r
 if sys.platform == "darwin":
     hiddenimports += ["objc", "Foundation", "AppKit", "Quartz", "CoreMedia", "AVFoundation",
                       "ScreenCaptureKit", "dispatch"]
+    # Whisper na GPU (MLX): biblioteca nativa, shaders Metal e os arquivos do tokenizador
+    hiddenimports += collect_submodules("mlx") + collect_submodules("mlx_whisper") + \
+        ["tiktoken", "tiktoken_ext", "tiktoken_ext.openai_public", "more_itertools"]
+    binaries += collect_dynamic_libs("mlx")
+    datas += collect_data_files("mlx", includes=["**/*.metallib"]) + collect_data_files("mlx_whisper")
 elif sys.platform == "win32":
     hiddenimports += ["soundcard", "soundcard.mediafoundation", "cffi"] + collect_submodules("mss")
 

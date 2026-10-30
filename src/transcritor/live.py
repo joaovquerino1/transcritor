@@ -2,13 +2,13 @@
 
 Cada fonte de áudio (o microfone, que é você, e o som do computador, que são os outros
 participantes) tem seu próprio buffer. Quando alguém faz uma pausa, ou a fala passa de
-alguns segundos, o trecho vai para um modelo Whisper pequeno e rápido. O texto aparece em
-segundos; a transcrição completa, com identificação de cada participante, roda ao parar.
+alguns segundos, o trecho vai para o NVIDIA Parakeet, que roda no processador em uma fração
+do tempo real. O texto aparece em segundos; a transcrição completa, com identificação de cada
+participante, roda ao parar.
 """
 
 from __future__ import annotations
 
-import os
 import re
 import threading
 import time
@@ -17,10 +17,10 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from . import models
+from . import asr
 
 RATE = 16000
-LIVE_MODEL = "small"
+LIVE_MODEL = "ao vivo"     # marca a prévia ao vivo (Transcript.model), não é um modelo do Whisper
 MIN_CHUNK = 1.2        # s: trecho mínimo para transcrever
 MAX_CHUNK = 12.0       # s: corta mesmo sem pausa, para o texto não demorar
 PAUSE = 0.6            # s de silêncio que encerram uma fala
@@ -176,36 +176,22 @@ class LiveTranscriber:
             self.on_status("A transcrição ao vivo está atrasada; o texto completo sai ao parar."
                            if lag > BACKLOG_WARN else "")
 
-    def _load(self):
-        from faster_whisper import WhisperModel
-
-        def progress(frac: float, msg: str) -> None:
-            self.on_status(msg)
-
+    def _load(self) -> asr.Parakeet:
         self.on_status("Preparando a transcrição ao vivo…")
-        path = models.ensure_whisper(LIVE_MODEL, progress, self._stop)
-        threads = max(2, min(4, (os.cpu_count() or 4) // 2))
-        return WhisperModel(path, device="cpu", compute_type="int8", cpu_threads=threads)
+        return asr.parakeet(lambda frac, msg: self.on_status(msg), self._stop)
 
-    def _transcribe(self, model, source: int, t0: float, audio: np.ndarray) -> None:
+    def _transcribe(self, model: asr.Parakeet, source: int, t0: float, audio: np.ndarray) -> None:
         try:
-            segments, _ = model.transcribe(
-                audio, language=self.language, hotwords=self.hotwords, beam_size=1,
-                vad_filter=True, vad_parameters={"min_silence_duration_ms": 400},
-                condition_on_previous_text=False, without_timestamps=False,
-            )
-            for seg in segments:
-                text = seg.text.strip()
-                if (not text or (seg.no_speech_prob > 0.6 and seg.avg_logprob < -1.0)
-                        or seg.avg_logprob < -1.5 or _HALLUCINATIONS.search(text)):
-                    continue
-                out = LiveSegment(source, t0 + seg.start, t0 + seg.end, text)
-                if source == SOURCES["mic"]:
-                    self._held.append((time.monotonic(), out))
-                else:
-                    self._recent.append(out)
-                    self._recent = [r for r in self._recent if r.end > out.end - 60]
-                    self.on_segment(out)
+            text = model.text(audio)
+            if not text or _HALLUCINATIONS.search(text):
+                return
+            out = LiveSegment(source, t0, t0 + len(audio) / RATE, text)
+            if source == SOURCES["mic"]:
+                self._held.append((time.monotonic(), out))
+            else:
+                self._recent.append(out)
+                self._recent = [r for r in self._recent if r.end > out.end - 60]
+                self.on_segment(out)
         except Exception as e:  # noqa: BLE001
             self.log(f"Falha num trecho da transcrição ao vivo: {e}")
 

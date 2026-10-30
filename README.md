@@ -51,7 +51,7 @@ Para transcrever uma chamada (Teams, Zoom, Meet, WhatsApp…) enquanto ela acont
 3. Com **Transcrever ao vivo** marcado, o texto aparece enquanto vocês falam, separado em **Você** (microfone) e **Participantes** (som do computador). Sem fone, o microfone também capta o alto-falante; esse eco é reconhecido e descartado.
 4. Ao terminar, clique em **Parar e transcrever**. O arquivo `Reunião AAAA-MM-DD HHhMM.mp4` (ou `.m4a`, sem a tela) é salvo, junto com o texto ao vivo em `Reunião … (ao vivo).txt`, e a transcrição completa, com cada participante identificado, começa sozinha.
 
-A transcrição ao vivo usa o modelo Whisper small (rápido o bastante para acompanhar a conversa num processador comum). A versão final usa o modelo escolhido em **Modelo**.
+A transcrição ao vivo usa o NVIDIA Parakeet, que roda no processador em cerca de 4% do tempo real, então não pesa durante a chamada. A versão final usa o modelo escolhido em **Modelo**.
 
 - **macOS**: precisa do macOS 15 ou mais novo. Na primeira vez, autorize em Ajustes do Sistema > Privacidade e Segurança > **Gravação de Tela e Áudio do Sistema** e **Microfone**. Como o app não é assinado pela Apple, pode ser preciso autorizar de novo depois de cada atualização.
 - **Windows**: grava o áudio do alto-falante ou fone padrão. Se a sua voz não aparecer, confira em Configurações > Privacidade > Microfone se **Permitir que aplicativos da área de trabalho acessem o microfone** está ativado (o Teams novo usa outra permissão, então ele pode funcionar mesmo com essa desligada).
@@ -61,14 +61,23 @@ A transcrição ao vivo usa o modelo Whisper small (rápido o bastante para acom
 
 | Etapa | Modelo | Licença |
 |---|---|---|
-| Transcrição | OpenAI Whisper large-v3 turbo (via faster-whisper / CTranslate2). Opções: large-v3, medium, small | MIT |
+| Transcrição | OpenAI Whisper large-v3 turbo (na GPU via MLX nos Macs com Apple Silicon; no processador via faster-whisper / CTranslate2 no Windows). Opções: large-v3, medium, small | MIT |
+| Transcrição ultrarrápida e ao vivo | NVIDIA Parakeet TDT 0.6B v3 (int8, via sherpa-onnx) | CC-BY-4.0 |
 | Detecção de fala | Silero VAD | MIT |
 | Segmentação de falantes | pyannote segmentation 3.0 (ONNX, via sherpa-onnx) | MIT |
 | Identificação de voz | WeSpeaker ResNet34 (VoxCeleb) | Apache 2.0 |
 
 Os modelos ficam em `~/Library/Application Support/Transcritor/models` (macOS) ou `%LOCALAPPDATA%\Transcritor\models` (Windows).
 
-Desempenho: em CPU, o modo recomendado leva cerca de metade da duração do vídeo num Apple M3 (45 s de vídeo em ~26 s). No Windows, uma GPU NVIDIA com CUDA 12 e cuDNN 9 instalados é usada automaticamente; sem ela, roda na CPU.
+Desempenho e precisão medidos num MacBook Air M3 com 25 minutos de fala em português do Brasil (FLEURS pt_br):
+
+| Modelo | Erro (WER) | Tempo por minuto de áudio |
+|---|---|---|
+| Whisper large-v3 turbo na GPU (Mac) | 3,7% | ~9 s |
+| Whisper large-v3 turbo no processador (Windows) | 3,7% | ~40 s |
+| NVIDIA Parakeet (Ultrarrápido, Mac e Windows) | 5,3% | ~2 s |
+
+No Windows, uma GPU NVIDIA com CUDA 12 e cuDNN 9 instalados é usada automaticamente pelo Whisper; sem ela, roda no processador. Para reuniões longas num PC sem GPU, o Parakeet é a opção prática.
 
 ## Instalação
 
@@ -85,6 +94,7 @@ Manualmente (Python 3.10 a 3.13):
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install ".[build]"
+pip install --no-deps "mlx-whisper==0.4.3"   # só no Mac com Apple Silicon (Whisper na GPU)
 pyinstaller packaging/transcritor.spec --noconfirm
 ```
 
@@ -104,7 +114,7 @@ Transcritor --cli --dispositivos      # lista telas e microfones
 Transcritor --cli --gravar 0 --tela 2 --ao-vivo
 ```
 
-No macOS o executável fica em `/Applications/Transcritor.app/Contents/MacOS/Transcritor`. Opções: `--idioma pt|en|auto|mixed`, `--modelo large-v3-turbo|large-v3|medium|small`, `--falantes N`, `--sem-falantes`, `--vocabulario "..."`, `--saida pasta`, `--gravar SEGUNDOS`, `--sem-tela`, `--sem-microfone`, `--tela N`, `--microfone ID`, `--ao-vivo`, `--dispositivos`.
+No macOS o executável fica em `/Applications/Transcritor.app/Contents/MacOS/Transcritor`. Opções: `--idioma pt|en|auto|mixed`, `--modelo large-v3-turbo|large-v3|medium|small|parakeet`, `--falantes N`, `--sem-falantes`, `--vocabulario "..."`, `--saida pasta`, `--gravar SEGUNDOS`, `--sem-tela`, `--sem-microfone`, `--tela N`, `--microfone ID`, `--ao-vivo`, `--dispositivos`.
 
 ## Estrutura
 
@@ -114,6 +124,7 @@ No macOS o executável fica em `/Applications/Transcritor.app/Contents/MacOS/Tra
 - `src/transcritor/login_browser.py`: navegador de login que captura gravações do Teams/SharePoint
 - `src/transcritor/export.py`: TXT, DOCX, SRT, VTT, JSON
 - `src/transcritor/recorder.py`: gravação de reuniões (ScreenCaptureKit no macOS; WASAPI e mss no Windows)
+- `src/transcritor/asr.py`: Whisper na GPU do Mac (MLX) e NVIDIA Parakeet (sherpa-onnx)
 - `src/transcritor/live.py`: transcrição ao vivo durante a gravação, com descarte do eco do alto-falante
 - `src/transcritor/app.py`: interface (PySide6)
 - `src/transcritor/style.py`: cores dos temas claro e escuro, folha de estilo e ícones desenhados
