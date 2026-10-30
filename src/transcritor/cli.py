@@ -23,6 +23,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--microfone", default="", help="na gravação, id do microfone (veja --dispositivos)")
     ap.add_argument("--ao-vivo", action="store_true", help="na gravação, mostra a transcrição enquanto grava")
     ap.add_argument("--dispositivos", action="store_true", help="lista telas e microfones e sai")
+    ap.add_argument("--testar-audio", metavar="ARQUIVO", help=argparse.SUPPRESS)   # diagnóstico do player
     ap.add_argument("--manter-video", action="store_true", help="ao baixar links, manter o vídeo")
     ap.add_argument("--idioma", choices=list(LANGUAGES), default="pt")
     ap.add_argument("--modelo", choices=[m.key for m in models.WHISPER_MODELS], default="large-v3-turbo")
@@ -32,6 +33,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--formatos", default="txt,docx,srt", help=",".join(export.FORMATS))
     ap.add_argument("--saida", help="pasta de saída (padrão: a do vídeo)")
     args = ap.parse_args(argv)
+    if args.testar_audio:
+        return _test_audio(args.testar_audio)
     if args.dispositivos:
         from . import recorder
         print("Telas:")
@@ -136,3 +139,31 @@ def _record(args) -> Path:
     path = rec.stop(log)
     print(f"  Gravado: {path}", flush=True)
     return path
+
+
+def _test_audio(path: str) -> int:
+    """Toca o arquivo a partir de 5 s por 2 s e confere se o player andou (plugins do Qt Multimedia)."""
+    import time
+
+    from PySide6.QtCore import QCoreApplication, QUrl
+    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+    app = QCoreApplication.instance() or QCoreApplication([])
+    player, out = QMediaPlayer(), QAudioOutput()
+    out.setVolume(0.0)
+    player.setAudioOutput(out)
+    player.setSource(QUrl.fromLocalFile(str(Path(path).resolve())))
+    t = time.time()
+    while player.mediaStatus() in (QMediaPlayer.MediaStatus.LoadingMedia, QMediaPlayer.MediaStatus.NoMedia) \
+            and time.time() - t < 10:
+        app.processEvents()
+        time.sleep(0.02)
+    player.setPosition(5000)
+    player.play()
+    t = time.time()
+    while time.time() - t < 2:
+        app.processEvents()
+        time.sleep(0.02)
+    pos = player.position() / 1000
+    ok = pos > 5.5
+    print(f"Player: {pos:.1f} s, {player.errorString() or 'sem erro'} -> {'OK' if ok else 'FALHOU'}", flush=True)
+    return 0 if ok else 1

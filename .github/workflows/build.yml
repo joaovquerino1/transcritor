@@ -53,6 +53,9 @@ jobs:
           test -s smoke/reuniao.docx && test -s smoke/reuniao.srt
           grep -q "Falante 2" smoke/reuniao.txt
           grep -qi "trimestre" smoke/reuniao.txt
+          # Player (Qt Multimedia empacotado): clicar no horário de uma fala toca o áudio
+          "$EXE" --cli --testar-audio tests/fixtures/reuniao.mp4 || { cat "$LOG"; exit 1; }
+          cat "$LOG" || true
           # Parakeet (opção Ultrarrápido e transcrição ao vivo)
           mkdir -p smoke-pk
           "$EXE" --cli tests/fixtures/reuniao.mp4 --modelo parakeet --formatos txt --saida smoke-pk || { cat "$LOG"; exit 1; }

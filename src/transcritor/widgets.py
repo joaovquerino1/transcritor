@@ -241,6 +241,8 @@ class SpeakerEditor(FlowBox):
 
 
 class TranscriptView(QTextBrowser):
+    seekRequested = Signal(float)       # clicou no horário de uma fala
+
     """Leitura da transcrição: coluna de falante e tempo à esquerda, fala à direita.
 
     A largura do texto fica limitada (linhas longas cansam) e, em janelas estreitas,
@@ -254,6 +256,11 @@ class TranscriptView(QTextBrowser):
         super().__init__()
         self.setObjectName("transcript")
         self.setOpenExternalLinks(False)
+        self.setOpenLinks(False)
+        self.anchorClicked.connect(self._anchor)
+        self.query = ""
+        self.matches: list = []
+        self.match_i = -1
         f = style.tabular(QFont(self.font()))
         f.setPointSizeF(f.pointSizeF() + 2)
         self.document().setDefaultFont(f)
@@ -278,6 +285,48 @@ class TranscriptView(QTextBrowser):
         self.setHtml(transcript_html(self._tr, style.tokens(), self._narrow))
         self._apply_margins()
         bar.setValue(bar.maximum() if self.follow and at_end else pos)
+        if self.query:
+            self.search(self.query, keep=True)
+
+    def _anchor(self, url) -> None:
+        if url.scheme() == "t":
+            try:
+                self.seekRequested.emit(float(url.path()))
+            except ValueError:
+                pass
+
+    def search(self, query: str, keep: bool = False) -> int:
+        """Destaca todas as ocorrências. Retorna quantas achou."""
+        from PySide6.QtGui import QTextCharFormat
+        self.query = query.strip()
+        self.matches = []
+        doc = self.document()
+        if self.query:
+            cur = doc.find(self.query, 0)
+            while not cur.isNull():
+                self.matches.append(cur)
+                cur = doc.find(self.query, cur)
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor(style.accent().red(), style.accent().green(), style.accent().blue(), 70))
+        sels = []
+        for c in self.matches:
+            sel = QTextBrowser.ExtraSelection()
+            sel.cursor, sel.format = c, fmt
+            sels.append(sel)
+        self.setExtraSelections(sels)
+        if not keep:
+            self.match_i = -1
+        return len(self.matches)
+
+    def step(self, delta: int) -> int:
+        """Vai para a próxima (ou anterior) ocorrência. Retorna o índice atual, a partir de 1."""
+        if not self.matches:
+            return 0
+        self.match_i = (self.match_i + delta) % len(self.matches)
+        cur = self.matches[self.match_i]
+        self.setTextCursor(cur)
+        self.ensureCursorVisible()
+        return self.match_i + 1
 
     def _apply_margins(self) -> None:
         w = self.viewport().width()
@@ -307,7 +356,8 @@ def transcript_html(tr: Transcript, t: style.Tokens, narrow: bool) -> str:
     rows: list[str] = []
     prev = object()
     for u in tr.utterances:
-        ts = f'<span style="color:{t.text2}; font-size:small">{fmt_time(u.start)}</span>'
+        ts = (f'<a href="t:{u.start:.2f}" style="color:{t.text2}; font-size:small; text-decoration:none">'
+              f'{fmt_time(u.start)}</a>')
         who = ""
         if tr.diarized and u.speaker is not None and u.speaker != prev:
             who = (f'<span style="color:{color(u.speaker)}; font-weight:600">'

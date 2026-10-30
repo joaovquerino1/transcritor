@@ -21,7 +21,7 @@ for pkg in ("ctranslate2", "sherpa_onnx", "onnxruntime", "av"):
 # Deno: o yt-dlp precisa de um runtime de JavaScript para baixar do YouTube sem HTTP 403.
 import deno  # noqa: E402
 binaries += [(deno.find_deno_bin(), "deno")]
-hiddenimports = collect_submodules("sherpa_onnx") + ["ctranslate2", "av", "tokenizers"]
+hiddenimports = collect_submodules("sherpa_onnx") + ["ctranslate2", "av", "tokenizers", "PySide6.QtMultimedia"]
 hiddenimports += collect_submodules("yt_dlp") + ["yt_dlp_ejs", "imageio_ffmpeg"]
 # Dependências opcionais do yt-dlp (o yt-dlp atualizado em tempo de execução também as usa)
 hiddenimports += ["brotli", "certifi", "mutagen", "Cryptodome", "websockets", "requests", "urllib3"]
@@ -41,7 +41,7 @@ elif sys.platform == "win32":
 
 excludes = [
     "tkinter", "matplotlib", "PIL", "IPython", "pytest", "scipy", "pandas", "torch",
-    "PySide6.Qt3DCore", "PySide6.QtMultimedia", "PySide6.QtCharts", "PySide6.QtDataVisualization",
+    "PySide6.Qt3DCore", "PySide6.QtCharts", "PySide6.QtDataVisualization",
     "PySide6.QtGraphs", "PySide6.QtQuick3D", "PySide6.QtSql", "PySide6.QtTest", "PySide6.QtBluetooth",
 ]
 
@@ -60,6 +60,7 @@ QT_KEEP = {
     "QtCore", "QtGui", "QtWidgets", "QtNetwork", "QtDBus", "QtOpenGL", "QtPositioning",
     "QtPrintSupport", "QtQml", "QtQmlMeta", "QtQmlModels", "QtQmlWorkerScript", "QtQuick",
     "QtQuickWidgets", "QtWebChannel", "QtWebEngineCore", "QtWebEngineWidgets", "QtSvg",
+    "QtMultimedia", "QtConcurrent",     # tocar o áudio a partir do horário de uma fala
 }
 _qt_mac = re.compile(r"Qt[/\\]lib[/\\](Qt\w+)\.framework")
 _qt_win = re.compile(r"PySide6[/\\]Qt6(\w+?)\.dll$", re.I)

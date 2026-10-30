@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import html
+import math
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import (
     QColor, QDesktopServices, QFontDatabase, QGuiApplication, QIcon, QKeySequence, QPainter, QPalette,
@@ -21,7 +24,7 @@ from PySide6.QtWidgets import (
     QStackedWidget, QSystemTrayIcon, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import __version__, downloader, export, live, models, recorder, style, widgets
+from . import __version__, downloader, export, history, live, models, recorder, style, widgets
 from .engine import LANGUAGES, Engine, Options, Transcript, Utterance, fmt_time, output_stem
 from .widgets import FRAC_ROLE, META_ROLE, STATUS_ROLE, FileDelegate, FlowBox, LevelMeter, Responsive, SpeakerEditor, TranscriptView
 
@@ -180,10 +183,12 @@ class Worker(QObject):
     finished = Signal()
 
     def __init__(self, engine: Engine, jobs: list[tuple[int, str]], opts: Options,
-                 formats: list[str], out_dir: Optional[str], cancel: threading.Event) -> None:
+                 formats: list[str], out_dir: Optional[str], cancel: threading.Event,
+                 sources: Optional[dict] = None) -> None:
         super().__init__()
         self.engine, self.jobs, self.opts = engine, jobs, opts
         self.formats, self.out_dir, self.cancel = formats, out_dir, cancel
+        self.sources = sources or {}      # gravações: volume do microfone e do computador
 
     @Slot()
     def run(self) -> None:
@@ -197,6 +202,11 @@ class Worker(QObject):
                     lambda m, f, r=row: self.progress.emit(r, m, f),
                     self.log.emit, self.cancel,
                 )
+                if path in self.sources:
+                    me = live.name_self(tr, self.sources[path])
+                    if me is not None:
+                        live.apply_self_name(tr, me)
+                        self.log.emit("Sua voz foi reconhecida pelo microfone: o falante virou \"Você\".")
                 written = save_outputs(tr, self.formats, self.out_dir)
                 for w in written:
                     self.log.emit(f"Salvo: {w}")
@@ -313,6 +323,8 @@ class MainWindow(QMainWindow):
         self.live_tr: Optional[Transcript] = None
         self.levels = {"system": 0.0, "mic": 0.0}
         self.mic_peak = 0.0                 # maior volume do microfone desde o início
+        self.env = {"system": ([], []), "mic": ([], [])}   # volume de cada fonte ao longo da gravação
+        self.env_t0 = None
         self.rec_timer = QTimer(self)
         self.rec_timer.timeout.connect(self._rec_tick)
         self.tray: Optional[QSystemTrayIcon] = None
@@ -321,6 +333,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._load_settings()
+        self._load_history()
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
@@ -353,6 +366,8 @@ class MainWindow(QMainWindow):
         self.list = FileList()
         self.list.filesDropped.connect(self.add_files)
         self.list.currentRowChanged.connect(self.show_row)
+        self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self._list_menu)
         lv.addWidget(self.list, 1)
 
         lv.addSpacing(18)
@@ -632,6 +647,43 @@ class MainWindow(QMainWindow):
         header.box.addLayout(actions)
         vv.addWidget(header)
 
+        # Ouvir o áudio (clicar num horário leva até ele) e buscar no texto.
+        tools = Responsive(breakpoint=560, spacing=16)
+        self.player_box = QWidget()
+        pl = QHBoxLayout(self.player_box)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(8)
+        self.btn_play = _tool("play", "Tocar o áudio. Clique no horário de uma fala para ouvir a partir dela.")
+        self.btn_play.clicked.connect(self.toggle_play)
+        self.sl_pos = QSlider(Qt.Orientation.Horizontal)
+        self.sl_pos.setAccessibleName("Posição do áudio")
+        self.sl_pos.sliderMoved.connect(lambda ms: self.player and self.player.setPosition(ms))
+        self.lbl_pos = QLabel("00:00:00")
+        self.lbl_pos.setObjectName("playTime")
+        self.lbl_pos.setFont(style.tabular(self.lbl_pos.font()))
+        pl.addWidget(self.btn_play)
+        pl.addWidget(self.sl_pos, 1)
+        pl.addWidget(self.lbl_pos)
+        tools.box.addWidget(self.player_box, 1)
+        find = QHBoxLayout()
+        find.setSpacing(6)
+        self.ed_find = QLineEdit()
+        self.ed_find.setPlaceholderText("Buscar no texto (⌘F)")
+        self.ed_find.setClearButtonEnabled(True)
+        self.ed_find.setMinimumWidth(180)
+        self.ed_find.textChanged.connect(self._find)
+        self.ed_find.returnPressed.connect(lambda: self._find_step(1))
+        self.lbl_find = QLabel()
+        self.lbl_find.setProperty("role", "secondary")
+        self.lbl_find.setFont(style.tabular(self.lbl_find.font()))
+        find.addWidget(self.ed_find)
+        find.addWidget(self.lbl_find)
+        tools.box.addLayout(find)
+        vv.addSpacing(10)
+        vv.addWidget(tools)
+        self.player = None
+        self._player_src = ""
+
         self.speakers_box = QWidget()
         sb = QVBoxLayout(self.speakers_box)
         sb.setContentsMargins(0, 14, 0, 4)
@@ -647,6 +699,7 @@ class MainWindow(QMainWindow):
         vv.addWidget(_divider())
 
         self.text = TranscriptView()
+        self.text.seekRequested.connect(self.seek_to)
         vv.addWidget(self.text, 1)
         vv.setStretch(vv.indexOf(self.text), 1)
         self.result.addWidget(view)
@@ -691,8 +744,12 @@ class MainWindow(QMainWindow):
         self.user_hid_sidebar = False
         self._rerender = widgets.debounce(self, 200, lambda: self.text.show_transcript(self._shown))
         self._shown: Optional[Transcript] = None
+        self._hist_save = widgets.debounce(self, 800, lambda: self._remember(self._current() or {}))
 
         QShortcut(QKeySequence.StandardKey.Open, self, self.choose_files)
+        QShortcut(QKeySequence.StandardKey.Find, self, self._focus_find)
+        QShortcut(QKeySequence(Qt.Key.Key_Escape), self.ed_find, lambda: self.ed_find.clear(),
+                  context=Qt.ShortcutContext.WidgetShortcut)
         QShortcut(QKeySequence("Ctrl+Return"), self, self.start)
         QShortcut(QKeySequence("Ctrl+Alt+S"), self, self.toggle_sidebar)
         for key in (QKeySequence.StandardKey.Delete, QKeySequence(Qt.Key.Key_Backspace)):
@@ -713,6 +770,7 @@ class MainWindow(QMainWindow):
         self.btn_copy.setIcon(style.icon("copy", ink))
         self.btn_open.setIcon(style.icon("folder", ink))
         self.btn_resave.setIcon(style.icon("save", ink))
+        self._play_icon()
         self._set_rec_icon()
         self._toggle_more(self.btn_more.isChecked())
         self.list.viewport().update()
@@ -860,17 +918,77 @@ class MainWindow(QMainWindow):
     def remove_selected(self) -> None:
         if self.thread:
             return
+        gone = []
         for row in sorted((self.list.row(i) for i in self.list.selectedItems()), reverse=True):
             self.list.takeItem(row)
-            del self.files[row]
+            gone.append(self.files.pop(row).get("hist"))
+        history.delete([h for h in gone if h])
         self.show_row(self.list.currentRow())
 
     def clear_files(self) -> None:
         if self.thread:
             return
+        if any(f.get("hist") for f in self.files) and QMessageBox.question(
+                self, "Transcritor", "Tirar todas as transcrições da lista?\n\nOs arquivos já "
+                "salvos (.txt, .docx…) continuam nas pastas.") != QMessageBox.StandardButton.Yes:
+            return
+        history.delete([f["hist"] for f in self.files if f.get("hist")])
         self.list.clear()
         self.files.clear()
         self.show_row(-1)
+
+    # ------------------------------------------------------------ histórico
+    def _load_history(self) -> None:
+        for item in reversed(history.load_index()):
+            if item["path"] in {f["path"] for f in self.files}:
+                continue
+            self.files.append({"path": item["path"], "status": "done", "transcript": None,
+                               "outputs": item.get("outputs", []), "hist": item["id"]})
+            li = QListWidgetItem()
+            li.setToolTip(item["path"])
+            self.list.addItem(li)
+            n = item.get("speakers", 0)
+            extra = fmt_time(item.get("duration", 0)) + (f", {n} falante" + ("s" if n != 1 else "") if n else "")
+            self._refresh_item(len(self.files) - 1, extra)
+        self.empty.set_state(has_files=bool(self.files))
+
+    def _remember(self, f: dict) -> None:
+        if not f.get("transcript"):
+            return
+        f.setdefault("hist", history.new_id(f["path"]))
+        try:
+            history.save(f["hist"], f["path"], f["outputs"], f["transcript"])
+        except OSError as e:
+            self.append_log(f"Não foi possível guardar no histórico: {e}")
+
+    def _list_menu(self, pos) -> None:
+        rows = sorted(self.list.row(i) for i in self.list.selectedItems())
+        if not rows:
+            return
+        menu = QMenu(self)
+        redo = menu.addAction("Transcrever de novo")
+        redo.setEnabled(not self.thread and any(self.files[r]["status"] != "pending" for r in rows))
+        reveal = menu.addAction("Mostrar na pasta")
+        reveal.setEnabled(len(rows) == 1)
+        menu.addSeparator()
+        remove = menu.addAction("Remover da lista")
+        remove.setEnabled(not self.thread)
+        chosen = menu.exec(self.list.viewport().mapToGlobal(pos))
+        if chosen is redo:
+            for r in rows:
+                self.files[r]["status"] = "pending"
+                self._refresh_item(r)
+            self.status.setText("Escolha o modelo e clique em Transcrever.")
+        elif chosen is reveal:
+            f = self.files[rows[0]]
+            target = Path(f["outputs"][0]) if f["outputs"] else Path(f["path"])
+            if sys.platform == "darwin" and target.exists():
+                import subprocess
+                subprocess.run(["open", "-R", str(target)], check=False)
+            else:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(target.parent)))
+        elif chosen is remove:
+            self.remove_selected()
 
     def choose_out_dir(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "Pasta de saída", self.ed_out.text() or str(Path.home()))
@@ -901,7 +1019,8 @@ class MainWindow(QMainWindow):
             self._refresh_item(i)
         self.cancel.clear()
         self.thread = QThread()
-        self.worker = Worker(self.engine, jobs, self._options(), formats, out_dir, self.cancel)
+        sources = {f["path"]: f["sources"] for f in self.files if f.get("sources")}
+        self.worker = Worker(self.engine, jobs, self._options(), formats, out_dir, self.cancel, sources)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.on_progress)
@@ -1037,6 +1156,8 @@ class MainWindow(QMainWindow):
         self._set_rec_busy("Iniciando…")
         self.levels = {"system": 0.0, "mic": 0.0}
         self.mic_peak = 0.0
+        self.env = {"system": ([], []), "mic": ([], [])}
+        self.env_t0 = None
         self.live = None
         self.live_tr = None
         if self.ck_rec_live.isChecked():
@@ -1063,6 +1184,13 @@ class MainWindow(QMainWindow):
         """Áudio de cada fonte, vindo das threads de captura: medidores e transcrição ao vivo."""
         peak = float(abs(samples).max()) if len(samples) else 0.0
         self.levels[source] = max(peak, self.levels[source])
+        if len(samples):
+            now = time.monotonic()
+            if self.env_t0 is None:
+                self.env_t0 = now
+            times, dbs = self.env[source]
+            times.append(now - self.env_t0 - len(samples) / rate)
+            dbs.append(20 * math.log10(math.sqrt(float((samples * samples).mean())) + 1e-5))
         if source == "mic":
             self.mic_peak = max(self.mic_peak, peak)
         if self.live:
@@ -1121,7 +1249,6 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def on_rec_started(self) -> None:
-        import time
         self.rec_busy = False
         self.rec_t0 = time.monotonic()
         self.rec_warned = False
@@ -1156,7 +1283,6 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     def _rec_tick(self) -> None:
-        import time
         if self.rec is None:
             return
         err = self.rec.error()
@@ -1253,6 +1379,7 @@ class MainWindow(QMainWindow):
         self.append_log(f"Gravação salva: {path}")
         preview, self.live, self.live_tr = self.live_tr, None, None
         self.add_files([path])
+        self.files[-1]["sources"] = {k: (np.array(t), np.array(d)) for k, (t, d) in self.env.items()}
         if preview is not None and preview.utterances:
             preview.source = path
             self.files[-1]["preview"] = preview
@@ -1298,6 +1425,8 @@ class MainWindow(QMainWindow):
     def on_done(self, row: int, tr: Transcript, outputs: list) -> None:
         f = self.files[row]
         f.update(status="done", transcript=tr, outputs=outputs)
+        f.pop("preview", None)
+        self._remember(f)
         self._refresh_item(row, self._summary(tr))
         if self.list.currentRow() in (row, -1):
             self.list.setCurrentRow(row)
@@ -1344,6 +1473,8 @@ class MainWindow(QMainWindow):
     def show_row(self, row: int) -> None:
         self.current_row = row
         f = self.files[row] if 0 <= row < len(self.files) else {}
+        if f and f.get("transcript") is None and f.get("hist") and f["status"] == "done":
+            f["transcript"] = history.load(f["hist"])
         tr = f.get("transcript")
         preview = tr is None and f.get("preview") is not None
         if preview:
@@ -1367,6 +1498,14 @@ class MainWindow(QMainWindow):
         self.speakers.set_speakers(tr.speaker_names)
         self.text.verticalScrollBar().setValue(0)
         self.text.show_transcript(tr)
+        self.player_box.setVisible(Path(tr.source).exists())
+        if self.player and self._player_src != tr.source:
+            self.player.stop()
+        if self._player_src != tr.source:
+            self.sl_pos.setRange(0, int(tr.duration * 1000))
+            self.sl_pos.setValue(0)
+            self.lbl_pos.setText(f"00:00:00 / {fmt_time(tr.duration)}")
+        self._find(self.ed_find.text())
 
     @staticmethod
     def _summary(tr: Transcript, with_lang: bool = False) -> str:
@@ -1385,6 +1524,92 @@ class MainWindow(QMainWindow):
         default = live.SOURCE_NAMES[spk] if tr.model == live.LIVE_MODEL else f"Falante {spk + 1}"
         tr.speaker_names[spk] = name.strip() or default
         self._rerender.start()
+        self._hist_save.start()
+
+    # --------------------------------------------------------------- áudio
+    def _ensure_player(self, source: str) -> bool:
+        if not Path(source).exists():
+            return False
+        if self.player is None:
+            from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+            self.player = QMediaPlayer(self)
+            self._audio_out = QAudioOutput(self)
+            self.player.setAudioOutput(self._audio_out)
+            self.player.positionChanged.connect(self._on_position)
+            self.player.durationChanged.connect(lambda ms: ms > 0 and self.sl_pos.setRange(0, ms))
+            self.player.playbackStateChanged.connect(lambda _: self._play_icon())
+            self.player.errorOccurred.connect(lambda _e, msg: self.append_log(f"Não foi possível tocar o áudio: {msg}"))
+            self.player.mediaStatusChanged.connect(self._on_media_status)
+            self._pending_seek: Optional[int] = None
+        if self._player_src != source:
+            self._player_src = source
+            self.player.setSource(QUrl.fromLocalFile(source))
+        return True
+
+    def toggle_play(self) -> None:
+        tr = self._shown
+        if tr is None or not self._ensure_player(tr.source):
+            return
+        from PySide6.QtMultimedia import QMediaPlayer
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
+        else:
+            self.player.play()
+
+    def seek_to(self, seconds: float) -> None:
+        tr = self._shown
+        if tr is None or not self._ensure_player(tr.source):
+            return
+        ms = int(max(seconds - 0.3, 0) * 1000)
+        from PySide6.QtMultimedia import QMediaPlayer
+        if self.player.mediaStatus() in (QMediaPlayer.MediaStatus.LoadingMedia,
+                                         QMediaPlayer.MediaStatus.NoMedia):
+            self._pending_seek = ms          # o arquivo ainda está abrindo: posiciona quando carregar
+        else:
+            self.player.setPosition(ms)
+        self.player.play()
+
+    def _on_media_status(self, status) -> None:
+        from PySide6.QtMultimedia import QMediaPlayer
+        if self._pending_seek is not None and status in (QMediaPlayer.MediaStatus.LoadedMedia,
+                                                         QMediaPlayer.MediaStatus.BufferedMedia,
+                                                         QMediaPlayer.MediaStatus.BufferingMedia):
+            self.player.setPosition(self._pending_seek)
+            self._pending_seek = None
+
+    def _on_position(self, ms: int) -> None:
+        if not self.sl_pos.isSliderDown():
+            self.sl_pos.setValue(ms)
+        total = self.player.duration() / 1000 if self.player else 0
+        self.lbl_pos.setText(f"{fmt_time(ms / 1000)} / {fmt_time(total)}")
+
+    def _play_icon(self) -> None:
+        playing = False
+        if self.player is not None:
+            from PySide6.QtMultimedia import QMediaPlayer
+            playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        ink = self.palette().color(QPalette.ColorRole.WindowText)
+        self.btn_play.setIcon(style.icon("pause" if playing else "play", ink))
+        self.btn_play.setToolTip("Pausar" if playing else
+                                 "Tocar o áudio. Clique no horário de uma fala para ouvir a partir dela.")
+
+    # --------------------------------------------------------------- busca
+    def _focus_find(self) -> None:
+        if self.result.currentIndex() == 1:
+            self.tabs.setCurrentIndex(0)
+            self.ed_find.setFocus()
+            self.ed_find.selectAll()
+
+    def _find(self, text: str) -> None:
+        n = self.text.search(text)
+        self.lbl_find.setText("" if not text.strip() else (f"{n}" if n else "nada"))
+        if n:
+            self._find_step(1)
+
+    def _find_step(self, delta: int) -> None:
+        i = self.text.step(delta)
+        if i:
+            self.lbl_find.setText(f"{i} de {len(self.text.matches)}")
 
     def _current(self):
         if 0 <= self.current_row < len(self.files):
@@ -1399,6 +1624,7 @@ class MainWindow(QMainWindow):
         out_dir = self.ed_out.text().strip() or None
         try:
             f["outputs"] = [str(p) for p in save_outputs(f["transcript"], formats, out_dir)]
+            self._remember(f)
             self.status.setText("Arquivos salvos: " + ", ".join(Path(p).name for p in f["outputs"]))
         except Exception as e:
             QMessageBox.critical(self, "Transcritor", f"Erro ao salvar: {e}")

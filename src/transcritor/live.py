@@ -277,3 +277,61 @@ def _resample(x: np.ndarray, rate: int, b: _Buffer) -> np.ndarray:
     b.rest = np.zeros(0, dtype=np.float32)
     n_out = int(len(x) * RATE / rate)
     return np.interp(np.linspace(0, len(x) - 1, n_out), np.arange(len(x)), x).astype(np.float32)
+
+
+# ------------------------------------------------------------ "Você" na versão final
+MIC_ON = -45.0      # dBFS: o microfone está captando voz
+SYS_OFF = -50.0     # dBFS: o computador está em silêncio
+
+
+def name_self(tr, envelopes: dict) -> Optional[int]:
+    """Qual falante da transcrição final é quem gravou?
+
+    `envelopes` tem, para "mic" e "system", (instantes, volumes em dB) medidos na gravação.
+    Quem fala enquanto o microfone tem som e o computador está quieto é você; os outros
+    participantes falam com o som do computador ativo. Devolve o número do falante, ou None
+    se não der para saber com segurança (por exemplo, gravação sem microfone).
+    """
+    mic, sys_ = envelopes.get("mic"), envelopes.get("system")
+    if not tr.diarized or mic is None or not len(mic[0]):
+        return None
+
+    def level(env, t: np.ndarray) -> np.ndarray:
+        if env is None or not len(env[0]):
+            return np.full(len(t), -100.0)
+        times, db = env
+        i = np.clip(np.searchsorted(times, t), 1, len(times) - 1)
+        near = np.where(np.abs(times[i] - t) < np.abs(times[i - 1] - t), i, i - 1)
+        # O loopback do Windows não entrega nada no silêncio: lacuna = silêncio.
+        return np.where(np.abs(times[near] - t) < 0.25, db[near], -100.0)
+
+    scores: dict[int, tuple[float, int]] = {}
+    for spk in tr.speaker_names:
+        t = np.concatenate([np.arange(w.start, max(w.end, w.start + 0.1), 0.1)
+                            for u in tr.utterances if u.speaker == spk for w in (u.words or [u])])
+        if len(t) < 20:
+            continue
+        m, s = level(mic, t), level(sys_, t)
+        own = np.sum((m > MIC_ON) & (s < SYS_OFF))
+        other = np.sum(s >= SYS_OFF)
+        if own + other >= 20:
+            scores[spk] = (own / (own + other), own + other)
+    if not scores:
+        return None
+    ranked = sorted(scores, key=lambda k: -scores[k][0])
+    best = ranked[0]
+    second = scores[ranked[1]][0] if len(ranked) > 1 else 0.0
+    if scores[best][0] >= 0.6 and scores[best][0] - second >= 0.25:
+        return best
+    return None
+
+
+def apply_self_name(tr, spk: int) -> None:
+    """Chama o falante `spk` de "Você" e renumera os demais a partir de 1."""
+    n = 0
+    for k in sorted(tr.speaker_names):
+        if k == spk:
+            tr.speaker_names[k] = "Você"
+        else:
+            n += 1
+            tr.speaker_names[k] = f"Falante {n}"

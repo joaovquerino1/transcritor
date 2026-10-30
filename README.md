@@ -14,6 +14,8 @@ Otimizado para **português do Brasil** e **inglês** (também tem detecção au
 4. Na primeira vez, o programa baixa os modelos de IA (~1,7 GB no modo recomendado). Depois disso funciona offline.
 5. Veja o resultado ao lado da lista. Em **Nomes dos falantes** dá para trocar "Falante 1" por "Maria"; depois clique em **Salvar de novo**.
 
+Para conferir um trecho, clique no horário da fala: o áudio toca a partir dali. **⌘F** busca palavras no texto (Enter vai para a próxima). As transcrições ficam na lista quando você fecha e abre o app de novo, com os nomes dos falantes que você editou; clique com o botão direito num item para **Transcrever de novo** (com outro modelo, por exemplo) ou **Mostrar na pasta**.
+
 A janela se ajusta a telas pequenas: abaixo de 900 px de largura a barra lateral se recolhe e volta pelo botão no canto superior (⌘⌥S). O tema claro ou escuro acompanha o sistema. As opções menos usadas (número de falantes, separação de vozes, vocabulário, pasta e formatos) ficam em **Mais opções**.
 
 ## Baixar da internet
@@ -49,7 +51,7 @@ Para transcrever uma chamada (Teams, Zoom, Meet, WhatsApp…) enquanto ela acont
 1. Em **Gravar reunião**, escolha o que gravar: **Tela** (e qual delas, se você usa mais de um monitor), **Som do computador** (as vozes dos outros participantes) e **Microfone** (a sua voz; escolha o mesmo microfone que você usa na chamada).
 2. Clique em **Gravar**. Um ícone vermelho aparece na barra de menus (macOS) ou na bandeja (Windows), com a opção **Parar e transcrever**. As barrinhas ao lado de cada fonte mostram o volume que está chegando: se a do microfone ficar parada, o app avisa.
 3. Com **Transcrever ao vivo** marcado, o texto aparece enquanto vocês falam, separado em **Você** (microfone) e **Participantes** (som do computador). Sem fone, o microfone também capta o alto-falante; esse eco é reconhecido e descartado.
-4. Ao terminar, clique em **Parar e transcrever**. O arquivo `Reunião AAAA-MM-DD HHhMM.mp4` (ou `.m4a`, sem a tela) é salvo, junto com o texto ao vivo em `Reunião … (ao vivo).txt`, e a transcrição completa, com cada participante identificado, começa sozinha.
+4. Ao terminar, clique em **Parar e transcrever**. Na transcrição completa, o falante que é você é reconhecido pelo microfone e já aparece como **Você**. O arquivo `Reunião AAAA-MM-DD HHhMM.mp4` (ou `.m4a`, sem a tela) é salvo, junto com o texto ao vivo em `Reunião … (ao vivo).txt`, e a transcrição completa, com cada participante identificado, começa sozinha.
 
 A transcrição ao vivo usa o NVIDIA Parakeet, que roda no processador em cerca de 4% do tempo real, então não pesa durante a chamada. A versão final usa o modelo escolhido em **Modelo**.
 
@@ -126,6 +128,7 @@ No macOS o executável fica em `/Applications/Transcritor.app/Contents/MacOS/Tra
 - `src/transcritor/recorder.py`: gravação de reuniões (ScreenCaptureKit no macOS; WASAPI e mss no Windows)
 - `src/transcritor/asr.py`: Whisper na GPU do Mac (MLX) e NVIDIA Parakeet (sherpa-onnx)
 - `src/transcritor/live.py`: transcrição ao vivo durante a gravação, com descarte do eco do alto-falante
+- `src/transcritor/history.py`: histórico de transcrições entre sessões
 - `src/transcritor/app.py`: interface (PySide6)
 - `src/transcritor/style.py`: cores dos temas claro e escuro, folha de estilo e ícones desenhados
 - `src/transcritor/widgets.py`: lista de arquivos, leitura da transcrição, nomes dos falantes e layout que quebra linha

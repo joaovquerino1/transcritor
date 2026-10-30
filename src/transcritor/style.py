@@ -96,6 +96,7 @@ def stylesheet(t: Tokens) -> str:
     QWidget#recPanel[live="true"] {{ background: {t.rec_bg}; border-radius: 8px; }}
     QLabel#recTime {{ color: {t.rec}; font-size: 15px; font-weight: 600; }}
     QLabel#recWarn {{ color: {t.rec}; }}
+    QLabel#playTime {{ color: {t.text2}; }}
 
     QProgressBar#bar {{ border: none; background: {t.track}; border-radius: 2px;
                         min-height: 4px; max-height: 4px; }}
@@ -156,6 +157,19 @@ def icon(name: str, color: QColor | str, size: int = 16) -> QIcon:
         path.lineTo(c, s * .63)
         path.lineTo(s * .75, s * .38)
         p.drawPath(path)
+    elif name == "play":
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(color))
+        path = QPainterPath(QPointF(s * .3, s * .2))
+        path.lineTo(s * .8, c)
+        path.lineTo(s * .3, s * .8)
+        path.closeSubpath()
+        p.drawPath(path)
+    elif name == "pause":
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(color))
+        p.drawRoundedRect(QRectF(s * .26, s * .2, s * .16, s * .6), 1, 1)
+        p.drawRoundedRect(QRectF(s * .58, s * .2, s * .16, s * .6), 1, 1)
     elif name == "record":
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(color))
