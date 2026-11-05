@@ -142,15 +142,19 @@ def _record(args) -> Path:
 
 
 def _test_audio(path: str) -> int:
-    """Toca o arquivo a partir de 5 s por 2 s e confere se o player andou (plugins do Qt Multimedia)."""
+    """Toca o arquivo a partir de 5 s por 2 s e confere se o player andou e se chegaram
+    quadros de vídeo com o horário certo (plugins do Qt Multimedia, usados pelo player com legenda)."""
     import time
 
     from PySide6.QtCore import QCoreApplication, QUrl
-    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
     app = QCoreApplication.instance() or QCoreApplication([])
-    player, out = QMediaPlayer(), QAudioOutput()
+    player, out, sink = QMediaPlayer(), QAudioOutput(), QVideoSink()
     out.setVolume(0.0)
     player.setAudioOutput(out)
+    player.setVideoSink(sink)
+    frames: list[float] = []
+    sink.videoFrameChanged.connect(lambda f: f.isValid() and frames.append(f.startTime() / 1e6))
     player.setSource(QUrl.fromLocalFile(str(Path(path).resolve())))
     t = time.time()
     while player.mediaStatus() in (QMediaPlayer.MediaStatus.LoadingMedia, QMediaPlayer.MediaStatus.NoMedia) \
@@ -166,4 +170,9 @@ def _test_audio(path: str) -> int:
     pos = player.position() / 1000
     ok = pos > 5.5
     print(f"Player: {pos:.1f} s, {player.errorString() or 'sem erro'} -> {'OK' if ok else 'FALHOU'}", flush=True)
+    if player.hasVideo():
+        last = frames[-1] if frames else -1.0
+        good = len(frames) > 10 and abs(last - pos) < 0.5
+        print(f"Vídeo: {len(frames)} quadros, último em {last:.2f} s -> {'OK' if good else 'FALHOU'}", flush=True)
+        ok = ok and good
     return 0 if ok else 1

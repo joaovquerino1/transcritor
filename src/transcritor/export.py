@@ -72,6 +72,10 @@ def _split_balanced(words: list[Word], max_chars: int, max_dur: float) -> list[l
 def _cues(tr: Transcript, max_chars: int = 80, max_dur: float = 7.0):
     """Quebra cada fala em legendas curtas, nunca misturando falantes."""
     for u in tr.utterances:
+        if not u.words:     # texto ao vivo: só a fala inteira, sem tempo por palavra
+            if u.text.strip():
+                yield u.start, u.end, u.speaker, u.text.strip()
+            continue
         sentences: list[list[Word]] = [[]]
         for w in u.words:
             sentences[-1].append(w)

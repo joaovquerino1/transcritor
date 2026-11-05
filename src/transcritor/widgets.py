@@ -3,7 +3,9 @@ editor de nomes dos falantes e a área de leitura da transcrição."""
 
 from __future__ import annotations
 
+import bisect
 import html
+import time
 from typing import Callable
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, Signal
@@ -267,10 +269,16 @@ class TranscriptView(QTextBrowser):
         self._tr: Transcript | None = None
         self._narrow = False
         self.follow = False        # ao vivo: acompanha o fim do texto enquanto ele cresce
+        self.ranges: dict[int, tuple[int, int]] = {}    # fala -> trecho do documento
+        self.current = -1          # fala tocando agora no player
+        self._scrolled_at = 0.0    # quando a pessoa rolou o texto à mão
+        self.verticalScrollBar().sliderPressed.connect(self._user_scrolled)
         self._timer = QTimer(self, singleShot=True, interval=120)
         self._timer.timeout.connect(self._rerender)
 
     def show_transcript(self, tr: Transcript | None) -> None:
+        if tr is not self._tr:
+            self.current = -1
         self._tr = tr
         self._rerender()
 
@@ -284,20 +292,92 @@ class TranscriptView(QTextBrowser):
         self._narrow = self.viewport().width() < self.NARROW
         self.setHtml(transcript_html(self._tr, style.tokens(), self._narrow))
         self._apply_margins()
+        self._map_ranges()
         bar.setValue(bar.maximum() if self.follow and at_end else pos)
         if self.query:
             self.search(self.query, keep=True)
 
     def _anchor(self, url) -> None:
-        if url.scheme() == "t":
-            try:
+        try:
+            if url.scheme() == "t":
                 self.seekRequested.emit(float(url.path()))
-            except ValueError:
-                pass
+            elif url.scheme() == "u" and self._tr is not None:
+                self.seekRequested.emit(self._tr.utterances[int(url.path())].start)
+        except (ValueError, IndexError):
+            pass
+
+    def _map_ranges(self) -> None:
+        self.ranges = {}
+        block = self.document().begin()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                href = frag.charFormat().anchorHref()
+                if href.startswith("u:"):
+                    i = int(href[2:])
+                    a, b = frag.position(), frag.position() + frag.length()
+                    old = self.ranges.get(i)
+                    self.ranges[i] = (min(a, old[0]), max(b, old[1])) if old else (a, b)
+                it += 1
+            block = block.next()
+        self._paint_selections()
+
+    def index_at(self, seconds: float) -> int:
+        """Fala que está acontecendo (ou a última que começou) no instante dado."""
+        if self._tr is None or not self._tr.utterances:
+            return -1
+        starts = [u.start for u in self._tr.utterances]
+        i = bisect.bisect_right(starts, seconds) - 1
+        return i
+
+    def set_current(self, i: int, scroll: bool = True) -> None:
+        """Destaca a fala que está tocando e, se a pessoa não estiver rolando, a mantém à vista."""
+        if i == self.current:
+            return
+        self.current = i
+        self._paint_selections()
+        if scroll and i in self.ranges and time.monotonic() - self._scrolled_at > 4:
+            from PySide6.QtGui import QTextCursor
+            cur = QTextCursor(self.document())
+            cur.setPosition(self.ranges[i][0])
+            r = self.cursorRect(cur)
+            vh = self.viewport().height()
+            if r.top() < vh * 0.12 or r.bottom() > vh * 0.75:
+                bar = self.verticalScrollBar()
+                bar.setValue(bar.value() + r.top() - int(vh * 0.3))
+
+    def _user_scrolled(self) -> None:
+        self._scrolled_at = time.monotonic()
+
+    def wheelEvent(self, e) -> None:
+        self._user_scrolled()
+        super().wheelEvent(e)
+
+    def _paint_selections(self) -> None:
+        from PySide6.QtGui import QTextCharFormat, QTextCursor
+        acc = style.accent()
+        sels = []
+        if self.current in self.ranges:
+            fmt = QTextCharFormat()
+            fmt.setBackground(QColor(acc.red(), acc.green(), acc.blue(), 38))
+            cur = QTextCursor(self.document())
+            a, b = self.ranges[self.current]
+            cur.setPosition(a)
+            cur.setPosition(b, QTextCursor.MoveMode.KeepAnchor)
+            sel = QTextBrowser.ExtraSelection()
+            sel.cursor, sel.format = cur, fmt
+            sels.append(sel)
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor(acc.red(), acc.green(), acc.blue(), 70))
+        for c in self.matches:
+            sel = QTextBrowser.ExtraSelection()
+            sel.cursor, sel.format = c, fmt
+            sels.append(sel)
+        self.setExtraSelections(sels)
 
     def search(self, query: str, keep: bool = False) -> int:
         """Destaca todas as ocorrências. Retorna quantas achou."""
-        from PySide6.QtGui import QTextCharFormat
         self.query = query.strip()
         self.matches = []
         doc = self.document()
@@ -306,14 +386,7 @@ class TranscriptView(QTextBrowser):
             while not cur.isNull():
                 self.matches.append(cur)
                 cur = doc.find(self.query, cur)
-        fmt = QTextCharFormat()
-        fmt.setBackground(QColor(style.accent().red(), style.accent().green(), style.accent().blue(), 70))
-        sels = []
-        for c in self.matches:
-            sel = QTextBrowser.ExtraSelection()
-            sel.cursor, sel.format = c, fmt
-            sels.append(sel)
-        self.setExtraSelections(sels)
+        self._paint_selections()
         if not keep:
             self.match_i = -1
         return len(self.matches)
@@ -355,14 +428,15 @@ def transcript_html(tr: Transcript, t: style.Tokens, narrow: bool) -> str:
 
     rows: list[str] = []
     prev = object()
-    for u in tr.utterances:
+    for i, u in enumerate(tr.utterances):
         ts = (f'<a href="t:{u.start:.2f}" style="color:{t.text2}; font-size:small; text-decoration:none">'
               f'{fmt_time(u.start)}</a>')
         who = ""
         if tr.diarized and u.speaker is not None and u.speaker != prev:
             who = (f'<span style="color:{color(u.speaker)}; font-weight:600">'
                    f'{html.escape(tr.speaker_label(u.speaker))}</span>')
-        text = html.escape(u.text)
+        text = (f'<a href="u:{i}" style="color:{t.text}; text-decoration:none">'
+                f'{html.escape(u.text)}</a>')
         new_turn = bool(who) or not tr.diarized
         gap = 14 if new_turn else 4
         if narrow:

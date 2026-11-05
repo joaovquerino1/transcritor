@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from . import __version__, downloader, export, history, live, models, recorder, style, widgets
 from .engine import LANGUAGES, Engine, Options, Transcript, Utterance, fmt_time, output_stem
+from .player import MediaSplit, VideoPlayer
 from .widgets import FRAC_ROLE, META_ROLE, STATUS_ROLE, FileDelegate, FlowBox, LevelMeter, Responsive, SpeakerEditor, TranscriptView
 
 MEDIA_EXTS = {
@@ -645,26 +646,7 @@ class MainWindow(QMainWindow):
             actions.addWidget(w)
         actions.addStretch(1)
         header.box.addLayout(actions)
-        vv.addWidget(header)
 
-        # Ouvir o áudio (clicar num horário leva até ele) e buscar no texto.
-        tools = Responsive(breakpoint=560, spacing=16)
-        self.player_box = QWidget()
-        pl = QHBoxLayout(self.player_box)
-        pl.setContentsMargins(0, 0, 0, 0)
-        pl.setSpacing(8)
-        self.btn_play = _tool("play", "Tocar o áudio. Clique no horário de uma fala para ouvir a partir dela.")
-        self.btn_play.clicked.connect(self.toggle_play)
-        self.sl_pos = QSlider(Qt.Orientation.Horizontal)
-        self.sl_pos.setAccessibleName("Posição do áudio")
-        self.sl_pos.sliderMoved.connect(lambda ms: self.player and self.player.setPosition(ms))
-        self.lbl_pos = QLabel("00:00:00")
-        self.lbl_pos.setObjectName("playTime")
-        self.lbl_pos.setFont(style.tabular(self.lbl_pos.font()))
-        pl.addWidget(self.btn_play)
-        pl.addWidget(self.sl_pos, 1)
-        pl.addWidget(self.lbl_pos)
-        tools.box.addWidget(self.player_box, 1)
         find = QHBoxLayout()
         find.setSpacing(6)
         self.ed_find = QLineEdit()
@@ -678,11 +660,9 @@ class MainWindow(QMainWindow):
         self.lbl_find.setFont(style.tabular(self.lbl_find.font()))
         find.addWidget(self.ed_find)
         find.addWidget(self.lbl_find)
-        tools.box.addLayout(find)
-        vv.addSpacing(10)
-        vv.addWidget(tools)
-        self.player = None
-        self._player_src = ""
+        actions.addSpacing(10)
+        actions.addLayout(find)
+        vv.addWidget(header)
 
         self.speakers_box = QWidget()
         sb = QVBoxLayout(self.speakers_box)
@@ -700,8 +680,21 @@ class MainWindow(QMainWindow):
 
         self.text = TranscriptView()
         self.text.seekRequested.connect(self.seek_to)
-        vv.addWidget(self.text, 1)
-        vv.setStretch(vv.indexOf(self.text), 1)
+        # Vídeo e texto lado a lado em janelas largas; um sobre o outro nas estreitas.
+        self.video = VideoPlayer(self.settings)
+        self.video.positionChanged.connect(self._on_play_position)
+        self.video.hasVideoChanged.connect(lambda _v: self._layout_media())
+        self.video.failed.connect(lambda msg: self.append_log(f"Não foi possível tocar o arquivo: {msg}"))
+        self.media_split = MediaSplit(Qt.Orientation.Vertical)
+        self.media_split.resized.connect(self._layout_media)
+        self.media_split.setObjectName("mediaSplit")
+        self.media_split.setChildrenCollapsible(False)
+        self.media_split.setHandleWidth(8)
+        self.media_split.addWidget(self.video)
+        self.media_split.addWidget(self.text)
+        self.media_split.setStretchFactor(1, 1)
+        self.media_split.splitterMoved.connect(lambda *_: self._save_media_sizes())
+        vv.addWidget(self.media_split, 1)
         self.result.addWidget(view)
 
         livepage = QWidget()
@@ -770,7 +763,7 @@ class MainWindow(QMainWindow):
         self.btn_copy.setIcon(style.icon("copy", ink))
         self.btn_open.setIcon(style.icon("folder", ink))
         self.btn_resave.setIcon(style.icon("save", ink))
-        self._play_icon()
+        self.video.apply_theme()
         self._set_rec_icon()
         self._toggle_more(self.btn_more.isChecked())
         self.list.viewport().update()
@@ -1488,6 +1481,7 @@ class MainWindow(QMainWindow):
         if tr is None:
             self.result.setCurrentIndex(0)
             self.text.show_transcript(None)
+            self.video.set_media("", None)
             return
         self.result.setCurrentIndex(1)
         self.lbl_title.setText(Path(tr.source).stem)
@@ -1498,13 +1492,10 @@ class MainWindow(QMainWindow):
         self.speakers.set_speakers(tr.speaker_names)
         self.text.verticalScrollBar().setValue(0)
         self.text.show_transcript(tr)
-        self.player_box.setVisible(Path(tr.source).exists())
-        if self.player and self._player_src != tr.source:
-            self.player.stop()
-        if self._player_src != tr.source:
-            self.sl_pos.setRange(0, int(tr.duration * 1000))
-            self.sl_pos.setValue(0)
-            self.lbl_pos.setText(f"00:00:00 / {fmt_time(tr.duration)}")
+        playable = Path(tr.source).exists() and not preview
+        self.video.setVisible(playable)
+        self.video.set_media(tr.source if playable else "", tr)
+        self._layout_media()
         self._find(self.ed_find.text())
 
     @staticmethod
@@ -1524,74 +1515,52 @@ class MainWindow(QMainWindow):
         default = live.SOURCE_NAMES[spk] if tr.model == live.LIVE_MODEL else f"Falante {spk + 1}"
         tr.speaker_names[spk] = name.strip() or default
         self._rerender.start()
+        self.video.surface.update()
         self._hist_save.start()
 
-    # --------------------------------------------------------------- áudio
-    def _ensure_player(self, source: str) -> bool:
-        if not Path(source).exists():
-            return False
-        if self.player is None:
-            from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-            self.player = QMediaPlayer(self)
-            self._audio_out = QAudioOutput(self)
-            self.player.setAudioOutput(self._audio_out)
-            self.player.positionChanged.connect(self._on_position)
-            self.player.durationChanged.connect(lambda ms: ms > 0 and self.sl_pos.setRange(0, ms))
-            self.player.playbackStateChanged.connect(lambda _: self._play_icon())
-            self.player.errorOccurred.connect(lambda _e, msg: self.append_log(f"Não foi possível tocar o áudio: {msg}"))
-            self.player.mediaStatusChanged.connect(self._on_media_status)
-            self._pending_seek: Optional[int] = None
-        if self._player_src != source:
-            self._player_src = source
-            self.player.setSource(QUrl.fromLocalFile(source))
-        return True
+    # --------------------------------------------------------------- player
+    WIDE_MEDIA = 1000       # a partir desta largura, vídeo à esquerda e texto à direita
 
-    def toggle_play(self) -> None:
-        tr = self._shown
-        if tr is None or not self._ensure_player(tr.source):
+    def _layout_media(self) -> None:
+        sp = self.media_split
+        has = self.video.has_video()
+        wide = has and sp.width() >= self.WIDE_MEDIA
+        orient = Qt.Orientation.Horizontal if wide else Qt.Orientation.Vertical
+        self.video.setMaximumHeight(16777215 if has else self.video.bar.sizeHint().height())
+        if sp.orientation() == orient and getattr(self, "_media_has", None) == has:
             return
-        from PySide6.QtMultimedia import QMediaPlayer
-        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
-            self.player.pause()
-        else:
-            self.player.play()
+        self._media_has = has
+        sp.setOrientation(orient)
+        key = "player/divisao_" + ("h" if wide else "v")
+        saved = self.settings.value(key)
+        total = sp.width() if wide else sp.height()
+        try:
+            sizes = [int(x) for x in saved] if saved and has else []
+        except (TypeError, ValueError):
+            sizes = []
+        if len(sizes) != 2 or sum(sizes) <= 0:
+            first = int(total * (0.58 if wide else 0.48)) if has else self.video.maximumHeight()
+            sizes = [first, max(total - first, 100)]
+        sp.setSizes(sizes)
+
+    def _save_media_sizes(self) -> None:
+        if self.video.has_video():
+            wide = self.media_split.orientation() == Qt.Orientation.Horizontal
+            self.settings.setValue("player/divisao_" + ("h" if wide else "v"), self.media_split.sizes())
 
     def seek_to(self, seconds: float) -> None:
         tr = self._shown
-        if tr is None or not self._ensure_player(tr.source):
+        if tr is None or not Path(tr.source).exists():
             return
-        ms = int(max(seconds - 0.3, 0) * 1000)
-        from PySide6.QtMultimedia import QMediaPlayer
-        if self.player.mediaStatus() in (QMediaPlayer.MediaStatus.LoadingMedia,
-                                         QMediaPlayer.MediaStatus.NoMedia):
-            self._pending_seek = ms          # o arquivo ainda está abrindo: posiciona quando carregar
-        else:
-            self.player.setPosition(ms)
-        self.player.play()
+        self.video.set_media(tr.source, tr)
+        self.video.seek(max(seconds - 0.1, 0))
 
-    def _on_media_status(self, status) -> None:
-        from PySide6.QtMultimedia import QMediaPlayer
-        if self._pending_seek is not None and status in (QMediaPlayer.MediaStatus.LoadedMedia,
-                                                         QMediaPlayer.MediaStatus.BufferedMedia,
-                                                         QMediaPlayer.MediaStatus.BufferingMedia):
-            self.player.setPosition(self._pending_seek)
-            self._pending_seek = None
+    def toggle_play(self) -> None:
+        self.video.toggle_play()
 
-    def _on_position(self, ms: int) -> None:
-        if not self.sl_pos.isSliderDown():
-            self.sl_pos.setValue(ms)
-        total = self.player.duration() / 1000 if self.player else 0
-        self.lbl_pos.setText(f"{fmt_time(ms / 1000)} / {fmt_time(total)}")
-
-    def _play_icon(self) -> None:
-        playing = False
-        if self.player is not None:
-            from PySide6.QtMultimedia import QMediaPlayer
-            playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
-        ink = self.palette().color(QPalette.ColorRole.WindowText)
-        self.btn_play.setIcon(style.icon("pause" if playing else "play", ink))
-        self.btn_play.setToolTip("Pausar" if playing else
-                                 "Tocar o áudio. Clique no horário de uma fala para ouvir a partir dela.")
+    def _on_play_position(self, seconds: float) -> None:
+        if self._shown is not None and self.video.source == self._shown.source:
+            self.text.set_current(self.text.index_at(seconds), scroll=self.video.is_playing())
 
     # --------------------------------------------------------------- busca
     def _focus_find(self) -> None:

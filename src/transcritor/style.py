@@ -97,6 +97,8 @@ def stylesheet(t: Tokens) -> str:
     QLabel#recTime {{ color: {t.rec}; font-size: 15px; font-weight: 600; }}
     QLabel#recWarn {{ color: {t.rec}; }}
     QLabel#playTime {{ color: {t.text2}; }}
+    QToolButton#speed {{ padding: 2px 6px; min-width: 34px; }}
+    QToolButton#speed::menu-indicator {{ image: none; width: 0px; }}
 
     QProgressBar#bar {{ border: none; background: {t.track}; border-radius: 2px;
                         min-height: 4px; max-height: 4px; }}
@@ -198,6 +200,54 @@ def icon(name: str, color: QColor | str, size: int = 16) -> QIcon:
         p.drawLine(QPointF(s * .32, s * .45), QPointF(c, s * .63))
         p.drawLine(QPointF(s * .68, s * .45), QPointF(c, s * .63))
         p.drawLine(QPointF(s * .2, s * .82), QPointF(s * .8, s * .82))
+    elif name in ("back", "forward"):
+        # seta circular: volta ou avança alguns segundos
+        r = QRectF(s * .2, s * .2, s * .6, s * .6)
+        if name == "back":
+            p.drawArc(r, 120 * 16, -300 * 16)
+            tip = QPointF(s * .35, s * .24)
+            path = QPainterPath(QPointF(tip.x() + s * .17, tip.y() - s * .04))
+            path.lineTo(tip)
+            path.lineTo(tip.x() + s * .08, tip.y() + s * .15)
+        else:
+            p.drawArc(r, 60 * 16, 300 * 16)
+            tip = QPointF(s * .65, s * .24)
+            path = QPainterPath(QPointF(tip.x() - s * .17, tip.y() - s * .04))
+            path.lineTo(tip)
+            path.lineTo(tip.x() - s * .08, tip.y() + s * .15)
+        p.drawPath(path)
+    elif name == "captions":
+        p.drawRoundedRect(QRectF(s * .12, s * .22, s * .76, s * .56), 2.5, 2.5)
+        p.drawLine(QPointF(s * .26, s * .56), QPointF(s * .5, s * .56))
+        p.drawLine(QPointF(s * .58, s * .56), QPointF(s * .74, s * .56))
+        p.drawLine(QPointF(s * .26, s * .42), QPointF(s * .38, s * .42))
+        p.drawLine(QPointF(s * .46, s * .42), QPointF(s * .74, s * .42))
+    elif name in ("expand", "collapse"):
+        # cantos para fora (tela cheia) ou para dentro (sair dela)
+        arm = s * .2
+        for sx in (-1, 1):
+            for sy in (-1, 1):
+                if name == "expand":
+                    x, y, d = c + sx * s * .32, c + sy * s * .32, -1
+                else:
+                    x, y, d = c + sx * s * .1, c + sy * s * .1, 1
+                path = QPainterPath(QPointF(x + d * sx * arm, y))
+                path.lineTo(x, y)
+                path.lineTo(x, y + d * sy * arm)
+                p.drawPath(path)
+    elif name == "volume":
+        p.setBrush(QColor(color))
+        path = QPainterPath(QPointF(s * .14, s * .4))
+        path.lineTo(s * .3, s * .4)
+        path.lineTo(s * .5, s * .22)
+        path.lineTo(s * .5, s * .78)
+        path.lineTo(s * .3, s * .6)
+        path.lineTo(s * .14, s * .6)
+        path.closeSubpath()
+        p.drawPath(path)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(QRectF(s * .38, s * .32, s * .3, s * .36), -50 * 16, 100 * 16)
+        p.drawArc(QRectF(s * .34, s * .2, s * .48, s * .6), -50 * 16, 100 * 16)
     p.end()
     return QIcon(pm)
 

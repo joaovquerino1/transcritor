@@ -14,7 +14,7 @@ Otimizado para **português do Brasil** e **inglês** (também tem detecção au
 4. Na primeira vez, o programa baixa os modelos de IA (~1,7 GB no modo recomendado). Depois disso funciona offline.
 5. Veja o resultado ao lado da lista. Em **Nomes dos falantes** dá para trocar "Falante 1" por "Maria"; depois clique em **Salvar de novo**.
 
-Para conferir um trecho, clique no horário da fala: o áudio toca a partir dali. **⌘F** busca palavras no texto (Enter vai para a próxima). As transcrições ficam na lista quando você fecha e abre o app de novo, com os nomes dos falantes que você editou; clique com o botão direito num item para **Transcrever de novo** (com outro modelo, por exemplo) ou **Mostrar na pasta**.
+O vídeo toca dentro do app com a legenda da transcrição, trocando no quadro exato em que cada fala começa. Clique em qualquer linha do texto para ir até aquele momento; a fala que está tocando fica destacada. Dá para mudar a velocidade (0,5× a 2×) e, em **Legenda…**, a fonte, o tamanho, as cores, o contorno, o fundo, a opacidade, a posição e o nome do falante. Atalhos no player: espaço toca e pausa, ← e → voltam e avançam 5 s, F abre a tela cheia e C liga e desliga a legenda. **⌘F** busca palavras no texto (Enter vai para a próxima). As transcrições ficam na lista quando você fecha e abre o app de novo, com os nomes dos falantes que você editou; clique com o botão direito num item para **Transcrever de novo** (com outro modelo, por exemplo) ou **Mostrar na pasta**.
 
 A janela se ajusta a telas pequenas: abaixo de 900 px de largura a barra lateral se recolhe e volta pelo botão no canto superior (⌘⌥S). O tema claro ou escuro acompanha o sistema. As opções menos usadas (número de falantes, separação de vozes, vocabulário, pasta e formatos) ficam em **Mais opções**.
 
@@ -131,5 +131,6 @@ No macOS o executável fica em `/Applications/Transcritor.app/Contents/MacOS/Tra
 - `src/transcritor/history.py`: histórico de transcrições entre sessões
 - `src/transcritor/app.py`: interface (PySide6)
 - `src/transcritor/style.py`: cores dos temas claro e escuro, folha de estilo e ícones desenhados
+- `src/transcritor/player.py`: player de vídeo com legenda, velocidade, tela cheia e configurações da legenda
 - `src/transcritor/widgets.py`: lista de arquivos, leitura da transcrição, nomes dos falantes e layout que quebra linha
 - `packaging/`: PyInstaller, DMG, Inno Setup e gerador de ícones
