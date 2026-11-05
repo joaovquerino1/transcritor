@@ -56,6 +56,9 @@ jobs:
           # Player (Qt Multimedia empacotado): clicar no horário de uma fala toca o áudio
           "$EXE" --cli --testar-audio tests/fixtures/reuniao.mp4 || { cat "$LOG"; exit 1; }
           cat "$LOG" || true
+          # Diagnóstico: o mesmo teste só com decodificação por software
+          QT_FFMPEG_DECODING_HW_DEVICE_TYPES=none "$EXE" --cli --testar-audio tests/fixtures/reuniao.mp4 || true
+          cat "$LOG" || true
           # Parakeet (opção Ultrarrápido e transcrição ao vivo)
           mkdir -p smoke-pk
           "$EXE" --cli tests/fixtures/reuniao.mp4 --modelo parakeet --formatos txt --saida smoke-pk || { cat "$LOG"; exit 1; }

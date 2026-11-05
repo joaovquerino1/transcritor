@@ -170,7 +170,10 @@ def _test_audio(path: str) -> int:
     pos = player.position() / 1000
     ok = pos > 5.5
     print(f"Player: {pos:.1f} s, {player.errorString() or 'sem erro'} -> {'OK' if ok else 'FALHOU'}", flush=True)
-    if player.hasVideo():
+    import os
+    print(f"Vídeo: hasVideo={player.hasVideo()} faixas={len(player.videoTracks())} quadros={len(frames)} "
+          f"hw={os.environ.get('QT_FFMPEG_DECODING_HW_DEVICE_TYPES', 'padrão')!r}", flush=True)
+    if player.hasVideo() or player.videoTracks():
         last = frames[-1] if frames else -1.0
         good = len(frames) > 10 and abs(last - pos) < 0.5
         print(f"Vídeo: {len(frames)} quadros, último em {last:.2f} s -> {'OK' if good else 'FALHOU'}", flush=True)
