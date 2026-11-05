@@ -713,6 +713,8 @@ class SubtitleDialog(QDialog):
                                    QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.close)
         buttons.button(QDialogButtonBox.StandardButton.Close).setText("Fechar")
+        buttons.button(QDialogButtonBox.StandardButton.Close).setDefault(True)
+        buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).setAutoDefault(False)
         buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).setText("Restaurar padrão")
         buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).clicked.connect(self._defaults)
 
