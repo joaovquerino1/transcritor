@@ -97,6 +97,7 @@ def main(argv: list[str]) -> int:
             stem = output_stem(path, tr.clip)
             if args.saida:
                 stem = Path(args.saida) / stem.name
+            stem.parent.mkdir(parents=True, exist_ok=True)
             for fmt in formats:
                 print(f"  Salvo: {export.export(tr, fmt, stem)}", flush=True)
         except Exception as e:
