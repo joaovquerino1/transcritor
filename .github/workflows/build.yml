@@ -65,6 +65,13 @@ jobs:
           cat smoke-pk/reuniao.txt
           grep -q "Falante 2" smoke-pk/reuniao.txt
           grep -qi "trimestre" smoke-pk/reuniao.txt
+          # Cortar: só o trecho de 0:12 a 0:31, com os horários do arquivo original
+          "$EXE" --cli tests/fixtures/reuniao.mp4 --modelo parakeet --inicio 0:12 --fim 0:31 --formatos txt --saida smoke-cut || { cat "$LOG"; exit 1; }
+          CUT="smoke-cut/reuniao (trecho 00h00m12s a 00h00m31s).txt"
+          cat "$CUT"
+          grep -q "00:00:12" "$CUT"
+          grep -q "Falante 3" "$CUT"
+          ! grep -qi "trimestre" "$CUT"
 
       - name: Teste de download (manifesto DASH, mesmo caminho das gravações do Teams)
         shell: bash

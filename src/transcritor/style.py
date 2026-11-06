@@ -235,6 +235,11 @@ def icon(name: str, color: QColor | str, size: int = 16) -> QIcon:
                 path.lineTo(x, y)
                 path.lineTo(x, y + d * sy * arm)
                 p.drawPath(path)
+    elif name == "scissors":
+        p.drawEllipse(QPointF(s * .3, s * .72), s * .12, s * .12)
+        p.drawEllipse(QPointF(s * .7, s * .72), s * .12, s * .12)
+        p.drawLine(QPointF(s * .38, s * .63), QPointF(s * .74, s * .16))
+        p.drawLine(QPointF(s * .62, s * .63), QPointF(s * .26, s * .16))
     elif name == "volume":
         p.setBrush(QColor(color))
         path = QPainterPath(QPointF(s * .14, s * .4))

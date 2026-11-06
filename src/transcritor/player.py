@@ -276,6 +276,7 @@ class VideoPlayer(QWidget):
         self.source = ""
         self._pending_seek: Optional[int] = None
         self._has_video = False
+        self.allow_full = True
         self._dialog: Optional[SubtitleDialog] = None
         self._home: Optional[tuple] = None          # onde o player estava antes da tela cheia
 
@@ -493,13 +494,15 @@ class VideoPlayer(QWidget):
         if self._pending_seek is not None and status in (S.LoadedMedia, S.BufferedMedia, S.BufferingMedia):
             self.player.setPosition(self._pending_seek)
             self._pending_seek = None
+        if status == S.LoadedMedia and self.player.playbackState() == QMediaPlayer.PlaybackState.StoppedState:
+            self.player.pause()      # pausado (não parado) mostra o quadro atual em vez de tela preta
         if status == S.EndOfMedia:
             self._sync_icons()
 
     def _on_has_video(self, has: bool) -> None:
         self._has_video = has
         self.surface.setVisible(has)
-        self.btn_full.setVisible(has)
+        self.btn_full.setVisible(has and self.allow_full)
         self.hasVideoChanged.emit(has)
 
     def has_video(self) -> bool:
@@ -541,7 +544,7 @@ class VideoPlayer(QWidget):
         if self._home is not None:
             self._exit_full()
             return
-        if not self._has_video:
+        if not self._has_video or not self.allow_full:
             return
         parent = self.parentWidget()
         lay = parent.layout() if parent else None

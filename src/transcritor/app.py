@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import math
+from dataclasses import replace
 import sys
 import threading
 import time
@@ -183,7 +184,7 @@ class Worker(QObject):
     fileFailed = Signal(int, str)
     finished = Signal()
 
-    def __init__(self, engine: Engine, jobs: list[tuple[int, str]], opts: Options,
+    def __init__(self, engine: Engine, jobs: list[tuple[int, str, Optional[tuple]]], opts: Options,
                  formats: list[str], out_dir: Optional[str], cancel: threading.Event,
                  sources: Optional[dict] = None) -> None:
         super().__init__()
@@ -193,13 +194,14 @@ class Worker(QObject):
 
     @Slot()
     def run(self) -> None:
-        for row, path in self.jobs:
+        for row, path, cut in self.jobs:
             if self.cancel.is_set():
                 break
             self.log.emit(f"— {Path(path).name}")
+            opts = replace(self.opts, start=cut[0], end=cut[1]) if cut else self.opts
             try:
                 tr = self.engine.run(
-                    path, self.opts,
+                    path, opts,
                     lambda m, f, r=row: self.progress.emit(r, m, f),
                     self.log.emit, self.cancel,
                 )
@@ -292,7 +294,7 @@ def _red_dot() -> QIcon:
 
 
 def save_outputs(tr: Transcript, formats: list[str], out_dir: Optional[str]) -> list[Path]:
-    stem = output_stem(tr.source)
+    stem = output_stem(tr.source, tr.clip)
     if out_dir:
         stem = Path(out_dir) / stem.name
     return [export.export(tr, fmt, stem) for fmt in formats]
@@ -355,18 +357,21 @@ class MainWindow(QMainWindow):
         self.btn_add.clicked.connect(self.choose_files)
         self.btn_remove = _tool("minus", "Remover os selecionados (⌫)")
         self.btn_remove.clicked.connect(self.remove_selected)
+        self.btn_cut = _tool("scissors", "Cortar: transcrever só um trecho do arquivo selecionado")
+        self.btn_cut.clicked.connect(self.cut_selected)
         self.btn_clear = QToolButton()
         self.btn_clear.setObjectName("flat")
         self.btn_clear.setText("Limpar")
         self.btn_clear.setToolTip("Tirar todos os arquivos da lista")
         self.btn_clear.clicked.connect(self.clear_files)
-        for b in (self.btn_add, self.btn_remove, self.btn_clear):
+        for b in (self.btn_add, self.btn_remove, self.btn_cut, self.btn_clear):
             head.addWidget(b)
         lv.addLayout(head)
         lv.addSpacing(6)
         self.list = FileList()
         self.list.filesDropped.connect(self.add_files)
         self.list.currentRowChanged.connect(self.show_row)
+        self.list.itemSelectionChanged.connect(self._sync_cut)
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._list_menu)
         lv.addWidget(self.list, 1)
@@ -752,6 +757,7 @@ class MainWindow(QMainWindow):
         self._apply_theme()
         self.show_row(-1)
         self._refresh_mics()
+        self._sync_cut()
 
     def _apply_theme(self) -> None:
         t = style.tokens()
@@ -759,6 +765,7 @@ class MainWindow(QMainWindow):
         ink = self.palette().color(QPalette.ColorRole.WindowText)
         self.btn_add.setIcon(style.icon("plus", ink))
         self.btn_remove.setIcon(style.icon("minus", ink))
+        self.btn_cut.setIcon(style.icon("scissors", ink))
         self.btn_side.setIcon(style.icon("sidebar", ink, 18))
         self.btn_copy.setIcon(style.icon("copy", ink))
         self.btn_open.setIcon(style.icon("folder", ink))
@@ -889,7 +896,7 @@ class MainWindow(QMainWindow):
             self.add_files(paths)
 
     def add_files(self, paths: list[str]) -> None:
-        known = {f["path"] for f in self.files}
+        known = {f["path"] for f in self.files if not f.get("cut")}
         for p in paths:
             if p in known:
                 continue
@@ -905,7 +912,11 @@ class MainWindow(QMainWindow):
         item = self.list.item(row)
         item.setText(Path(f["path"]).name)
         item.setData(STATUS_ROLE, f["status"])
-        item.setData(META_ROLE, extra or STATUS_TEXT[f["status"]])
+        meta = extra or STATUS_TEXT[f["status"]]
+        if f.get("cut"):
+            a, b = f["cut"]
+            meta = f"Trecho {fmt_time(a)} a {fmt_time(b)}" + (f", {meta}" if meta else "")
+        item.setData(META_ROLE, meta)
         item.setData(FRAC_ROLE, frac)
 
     def remove_selected(self) -> None:
@@ -933,9 +944,10 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ histórico
     def _load_history(self) -> None:
         for item in reversed(history.load_index()):
-            if item["path"] in {f["path"] for f in self.files}:
+            clip = tuple(item["clip"]) if item.get("clip") else None
+            if (item["path"], clip) in {(f["path"], f.get("cut")) for f in self.files}:
                 continue
-            self.files.append({"path": item["path"], "status": "done", "transcript": None,
+            self.files.append({"path": item["path"], "status": "done", "transcript": None, "cut": clip,
                                "outputs": item.get("outputs", []), "hist": item["id"]})
             li = QListWidgetItem()
             li.setToolTip(item["path"])
@@ -961,6 +973,11 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         redo = menu.addAction("Transcrever de novo")
         redo.setEnabled(not self.thread and any(self.files[r]["status"] != "pending" for r in rows))
+        cut = menu.addAction("Cortar trecho…")
+        cut.setEnabled(len(rows) == 1 and not self.thread and Path(self.files[rows[0]]["path"]).exists())
+        uncut = None
+        if len(rows) == 1 and self.files[rows[0]].get("cut") and self.files[rows[0]]["status"] != "done":
+            uncut = menu.addAction("Transcrever o arquivo inteiro")
         reveal = menu.addAction("Mostrar na pasta")
         reveal.setEnabled(len(rows) == 1)
         menu.addSeparator()
@@ -972,6 +989,11 @@ class MainWindow(QMainWindow):
                 self.files[r]["status"] = "pending"
                 self._refresh_item(r)
             self.status.setText("Escolha o modelo e clique em Transcrever.")
+        elif chosen is cut:
+            self.cut_selected()
+        elif uncut is not None and chosen is uncut:
+            self.files[rows[0]]["cut"] = None
+            self._refresh_item(rows[0])
         elif chosen is reveal:
             f = self.files[rows[0]]
             target = Path(f["outputs"][0]) if f["outputs"] else Path(f["path"])
@@ -983,6 +1005,49 @@ class MainWindow(QMainWindow):
         elif chosen is remove:
             self.remove_selected()
 
+    def _sync_cut(self) -> None:
+        rows = self.list.selectedItems()
+        f = self.files[self.list.row(rows[0])] if len(rows) == 1 else None
+        self.btn_cut.setEnabled(bool(f) and not self.thread and Path(f["path"]).exists())
+
+    def cut_selected(self) -> None:
+        """Escolher um trecho do arquivo selecionado, para transcrever só ele ou salvar como vídeo."""
+        rows = sorted(self.list.row(i) for i in self.list.selectedItems())
+        if len(rows) != 1 or self.thread:
+            return
+        row = rows[0]
+        f = self.files[row]
+        if not Path(f["path"]).exists():
+            return
+        from .trim import TrimDialog
+        self.video.stop()
+        tr = f.get("transcript")
+        dur = tr.duration if tr and not tr.clip else 0.0
+        dlg = TrimDialog(f["path"], dur, self.settings, self, f.get("cut"))
+        dlg.exec()
+        if dlg.action == "save":
+            self.append_log(f"Trecho salvo: {dlg.saved}")
+            self.add_files([dlg.saved])
+            new = next(i for i, x in enumerate(self.files) if x["path"] == dlg.saved and not x.get("cut"))
+            self.list.setCurrentRow(new)
+            self.status.setText("Trecho salvo como vídeo novo. Clique em Transcrever.")
+        elif dlg.action == "use":
+            clip = tuple(round(x, 2) for x in dlg.clip)
+            if f["status"] != "done" and not f.get("hist"):
+                f["cut"] = clip                  # ainda não transcrito: só marca o trecho
+                f["status"] = "pending"
+                target = row
+            else:                                # já transcrito: o trecho entra como item novo
+                self.files.append({"path": f["path"], "status": "pending", "transcript": None,
+                                   "outputs": [], "cut": clip})
+                item = QListWidgetItem()
+                item.setToolTip(f["path"])
+                self.list.addItem(item)
+                target = len(self.files) - 1
+            self._refresh_item(target)
+            self.list.setCurrentRow(target)
+            self.status.setText("Trecho marcado. Clique em Transcrever.")
+
     def choose_out_dir(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "Pasta de saída", self.ed_out.text() or str(Path.home()))
         if d:
@@ -992,7 +1057,7 @@ class MainWindow(QMainWindow):
     def start(self) -> None:
         if self.thread:
             return
-        jobs = [(i, f["path"]) for i, f in enumerate(self.files) if f["status"] != "done"]
+        jobs = [(i, f["path"], f.get("cut")) for i, f in enumerate(self.files) if f["status"] != "done"]
         if not jobs:
             QMessageBox.information(self, "Transcritor",
                                     "Adicione um ou mais vídeos primeiro (arraste para a lista).")
@@ -1007,7 +1072,7 @@ class MainWindow(QMainWindow):
             return
         self._save_settings()
 
-        for i, _ in jobs:
+        for i, *_ in jobs:
             self.files[i]["status"] = "pending"
             self._refresh_item(i)
         self.cancel.clear()
@@ -1400,6 +1465,7 @@ class MainWindow(QMainWindow):
             w.setEnabled(not on)
         if not on:
             self._sync_enabled()
+        self._sync_cut()
 
     @Slot(int, str, float)
     def on_progress(self, row: int, msg: str, frac: float) -> None:
@@ -1484,7 +1550,10 @@ class MainWindow(QMainWindow):
             self.video.set_media("", None)
             return
         self.result.setCurrentIndex(1)
-        self.lbl_title.setText(Path(tr.source).stem)
+        title = Path(tr.source).stem
+        if tr.clip:
+            title += f" (trecho {fmt_time(tr.clip[0])} a {fmt_time(tr.clip[1])})"
+        self.lbl_title.setText(title)
         self.lbl_meta.setText("Texto ao vivo. A transcrição completa, com cada participante "
                               "identificado, está sendo gerada." if preview
                               else self._summary(tr, with_lang=True))
@@ -1494,7 +1563,10 @@ class MainWindow(QMainWindow):
         self.text.show_transcript(tr)
         playable = Path(tr.source).exists() and not preview
         self.video.setVisible(playable)
+        changed = self.video.tr is not tr
         self.video.set_media(tr.source if playable else "", tr)
+        if playable and changed and tr.clip:
+            self.video.seek(tr.clip[0], play=False)      # trecho: o vídeo já abre no começo dele
         self._layout_media()
         self._find(self.ed_find.text())
 

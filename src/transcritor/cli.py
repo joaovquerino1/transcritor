@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 
 from . import downloader, export, models
-from .engine import LANGUAGES, Engine, Options
+from .engine import LANGUAGES, Engine, Options, output_stem, parse_time
 
 
 def main(argv: list[str]) -> int:
@@ -32,6 +32,10 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--vocabulario", default="")
     ap.add_argument("--formatos", default="txt,docx,srt", help=",".join(export.FORMATS))
     ap.add_argument("--saida", help="pasta de saída (padrão: a do vídeo)")
+    ap.add_argument("--inicio", type=parse_time, default=0.0, metavar="HH:MM:SS",
+                    help="transcrever só um trecho: a partir daqui")
+    ap.add_argument("--fim", type=parse_time, default=0.0, metavar="HH:MM:SS",
+                    help="transcrever só um trecho: até aqui")
     args = ap.parse_args(argv)
     if args.testar_audio:
         return _test_audio(args.testar_audio)
@@ -48,7 +52,10 @@ def main(argv: list[str]) -> int:
         ap.error("informe arquivos, links ou --gravar")
 
     formats = [f for f in args.formatos.split(",") if f in export.FORMATS]
-    opts = Options(language=args.idioma, model=args.modelo, diarize=not args.sem_falantes,
+    if args.fim and args.fim <= args.inicio:
+        ap.error("--fim precisa ser depois de --inicio")
+    opts = Options(start=args.inicio, end=args.fim,
+                   language=args.idioma, model=args.modelo, diarize=not args.sem_falantes,
                    num_speakers=args.falantes, hotwords=args.vocabulario)
     engine, cancel, last = Engine(), threading.Event(), [""]
 
@@ -87,7 +94,7 @@ def main(argv: list[str]) -> int:
         print(f"== {path}", flush=True)
         try:
             tr = engine.run(path, opts, progress, lambda m: print(f"  {m}", flush=True), cancel)
-            stem = Path(path).with_suffix("")
+            stem = output_stem(path, tr.clip)
             if args.saida:
                 stem = Path(args.saida) / stem.name
             for fmt in formats:

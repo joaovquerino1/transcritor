@@ -51,7 +51,7 @@ def new_id(path: str) -> str:
 def save(hid: str, path: str, outputs: list[str], tr: Transcript) -> None:
     data = {
         "source": tr.source, "language": tr.language, "duration": tr.duration, "model": tr.model,
-        "diarized": tr.diarized, "speaker_names": {str(k): v for k, v in tr.speaker_names.items()},
+        "diarized": tr.diarized, "clip": list(tr.clip) if tr.clip else None, "speaker_names": {str(k): v for k, v in tr.speaker_names.items()},
         "utterances": [{"start": u.start, "end": u.end, "speaker": u.speaker, "text": u.text,
                         "words": [[w.start, w.end, w.text, w.speaker] for w in u.words]}
                        for u in tr.utterances],
@@ -61,6 +61,7 @@ def save(hid: str, path: str, outputs: list[str], tr: Transcript) -> None:
     tmp.replace(_dir() / f"{hid}.json")
     items = [i for i in load_index() if i["id"] != hid]
     items.insert(0, {"id": hid, "path": path, "outputs": outputs, "duration": tr.duration,
+                     "clip": list(tr.clip) if tr.clip else None,
                      "speakers": len(tr.speaker_names) if tr.diarized else 0,
                      "saved": time.strftime("%Y-%m-%d %H:%M")})
     for old in items[MAX_ITEMS:]:
@@ -76,7 +77,8 @@ def load(hid: str) -> Optional[Transcript]:
     utts = [Utterance(u["start"], u["end"], u["speaker"], u["text"],
                       [Word(*w) for w in u.get("words", [])]) for u in d["utterances"]]
     return Transcript(d["source"], d["language"], d["duration"], d["model"], utts,
-                      {int(k): v for k, v in d["speaker_names"].items()}, d["diarized"])
+                      {int(k): v for k, v in d["speaker_names"].items()}, d["diarized"],
+                      tuple(d["clip"]) if d.get("clip") else None)
 
 
 def delete(hids: list[str]) -> None:

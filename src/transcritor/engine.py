@@ -57,11 +57,15 @@ class Transcript:
     utterances: list[Utterance]
     speaker_names: dict[int, str]
     diarized: bool
+    clip: Optional[tuple[float, float]] = None   # trecho do arquivo original (os horários já contam a partir do início dele)
 
     def speaker_label(self, spk: Optional[int]) -> str:
         if spk is None:
             return ""
         return self.speaker_names.get(spk, f"Falante {spk + 1}")
+
+
+CLIP_CONTEXT = 300.0     # segundos de contexto em volta de um trecho, para identificar falantes
 
 
 @dataclass
@@ -72,6 +76,8 @@ class Options:
     num_speakers: int = 0           # 0 = automático
     cluster_threshold: float = 0.42  # menor = separa mais falantes
     hotwords: str = ""              # nomes próprios, jargões
+    start: float = 0.0              # trecho: início, em segundos
+    end: float = 0.0                # trecho: fim (0 = até o fim do arquivo)
 
 
 ProgressFn = Callable[[str, float], None]   # (mensagem, fração 0..1 ou -1)
@@ -157,11 +163,16 @@ class Engine:
                 raise InterruptedError
 
         progress("Extraindo áudio do vídeo…", -1)
-        audio = load_audio(path)
+        clipped = opts.start > 0 or opts.end > 0
+        audio = load_audio(path, opts.start, opts.end)
         duration = len(audio) / SAMPLE_RATE
         if duration < 0.1:
-            raise RuntimeError("O arquivo não contém áudio.")
-        log(f"Áudio extraído: {fmt_time(duration)} de duração.")
+            raise RuntimeError("O trecho escolhido não tem áudio." if clipped else "O arquivo não contém áudio.")
+        if clipped:
+            log(f"Trecho de {fmt_time(opts.start)} a {fmt_time(opts.start + duration)} "
+                f"({fmt_time(duration)}).")
+        else:
+            log(f"Áudio extraído: {fmt_time(duration)} de duração.")
         check()
 
         # Pesos de progresso: transcrição 75%, diarização 25%.
@@ -206,9 +217,18 @@ class Engine:
                              w_tr + (1 - w_tr) * done / total)
                 return 1 if cancel.is_set() else 0
 
-            result = diarizer.process(audio, callback=cb)
+            # Num trecho curto há pouca voz de cada pessoa para separá-las bem: a identificação
+            # ouve também até 5 minutos antes e depois e depois fica só com o que cai no trecho.
+            ctx, shift = audio, 0.0
+            if clipped:
+                cs = max(opts.start - CLIP_CONTEXT, 0.0)
+                ctx = load_audio(path, cs, opts.start + duration + CLIP_CONTEXT)
+                shift = opts.start - cs
+                check()
+            result = diarizer.process(ctx, callback=cb)
             check()
-            turns = sorted(((s.start, s.end, s.speaker) for s in result.sort_by_start_time()),
+            turns = sorted(((s.start - shift, s.end - shift, s.speaker) for s in result.sort_by_start_time()
+                            if s.end - shift > 0 and s.start - shift < duration),
                            key=lambda t: t[0])
             assign_speakers(words, turns)
             smooth_speakers(words)
@@ -216,6 +236,11 @@ class Engine:
             speaker_names = {i: f"Falante {i + 1}" for i in range(order)}
             log(f"Falantes identificados: {order}.")
 
+        if clipped and words:
+            # horários do arquivo original: o player e a legenda usam o vídeo inteiro
+            for w in words:
+                w.start += opts.start
+                w.end += opts.start
         utterances = build_utterances(words, split_on_speaker=opts.diarize)
         progress("Concluído", 1.0)
         return Transcript(
@@ -226,6 +251,7 @@ class Engine:
             utterances=utterances,
             speaker_names=speaker_names,
             diarized=bool(speaker_names),
+            clip=(opts.start, opts.start + duration) if clipped else None,
         )
 
     def _run_ct2(self, model, audio, opts: Options, tr_progress, log: LogFn, check):
@@ -289,25 +315,42 @@ class Engine:
 
 
 # ---------------------------------------------------------------------- áudio
-def load_audio(path: str) -> np.ndarray:
-    """Decodifica qualquer formato suportado pelo FFmpeg (via PyAV) para mono 16 kHz."""
+def load_audio(path: str, start: float = 0.0, end: float = 0.0) -> np.ndarray:
+    """Decodifica qualquer formato suportado pelo FFmpeg (via PyAV) para mono 16 kHz.
+
+    Com start/end, decodifica só o trecho (pula direto para perto do início, sem ler o resto).
+    """
     import av
 
     chunks: list[np.ndarray] = []
+    first_t: Optional[float] = None
     with av.open(path, mode="r") as container:
         if not container.streams.audio:
             raise RuntimeError("O arquivo não contém nenhuma faixa de áudio.")
         stream = container.streams.audio[0]
         stream.thread_type = "AUTO"
+        if start > 1:
+            container.seek(int((start - 1) * av.time_base), any_frame=False)
         resampler = av.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
         for frame in container.decode(stream):
+            t = float(frame.pts * frame.time_base) if frame.pts is not None else None
+            if end and t is not None and t > end:
+                break
+            if first_t is None:
+                first_t = t if t is not None else 0.0
             for out in resampler.resample(frame):
                 chunks.append(out.to_ndarray().reshape(-1))
         for out in resampler.resample(None):
             chunks.append(out.to_ndarray().reshape(-1))
     if not chunks:
         return np.zeros(0, dtype=np.float32)
-    return np.concatenate(chunks).astype(np.float32) / 32768.0
+    audio = np.concatenate(chunks).astype(np.float32) / 32768.0
+    if start > 0 or end > 0:
+        a = max(int(round((start - (first_t or 0.0)) * SAMPLE_RATE)), 0)
+        audio = audio[a:]
+        if end > start:
+            audio = audio[: int(round((end - start) * SAMPLE_RATE))]
+    return audio
 
 
 # ------------------------------------------------------------------ alinhamento
@@ -401,6 +444,26 @@ def fmt_time(t: float, ms: bool = False, sep: str = ".") -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-def output_stem(path: str) -> Path:
+def output_stem(path: str, clip: Optional[tuple[float, float]] = None) -> Path:
     p = Path(path)
+    if clip:   # trecho: não sobrescreve a transcrição do arquivo inteiro
+        return p.with_name(f"{p.stem} (trecho {clip_label(clip[0])} a {clip_label(clip[1])})")
     return p.with_name(p.stem)
+
+
+def clip_label(t: float) -> str:
+    """00h12m05s: horário que pode ir em nome de arquivo (sem ":" por causa do Windows)."""
+    h, rem = divmod(int(round(t)), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}h{m:02d}m{s:02d}s"
+
+
+def parse_time(text: str) -> float:
+    """Aceita "1:02:03", "12:30", "95" ou "95.5" e devolve segundos."""
+    parts = text.strip().replace(",", ".").split(":")
+    if not text.strip() or len(parts) > 3:
+        raise ValueError(f"horário inválido: {text!r}")
+    total = 0.0
+    for p in parts:
+        total = total * 60 + float(p)
+    return total

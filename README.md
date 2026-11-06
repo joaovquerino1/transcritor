@@ -14,6 +14,8 @@ Otimizado para **português do Brasil** e **inglês** (também tem detecção au
 4. Na primeira vez, o programa baixa os modelos de IA (~1,7 GB no modo recomendado). Depois disso funciona offline.
 5. Veja o resultado ao lado da lista. Em **Nomes dos falantes** dá para trocar "Falante 1" por "Maria"; depois clique em **Salvar de novo**.
 
+Reunião longa e só precisa de uma parte? Selecione o arquivo e clique na **tesoura** (ou botão direito > **Cortar trecho…**). Marque o início e o fim arrastando as pontas da barra, digitando os horários ou com **Marcar aqui** (teclas I e O) enquanto assiste. **Transcrever só este trecho** processa apenas essa parte, com os horários do vídeo original, e os falantes continuam bem separados porque o app ouve alguns minutos em volta para reconhecê-los. **Salvar como vídeo…** cria um arquivo novo só com o trecho, cortado no ponto exato.
+
 O vídeo toca dentro do app com a legenda da transcrição, trocando no quadro exato em que cada fala começa. Clique em qualquer linha do texto para ir até aquele momento; a fala que está tocando fica destacada. Dá para mudar a velocidade (0,5× a 2×) e, em **Legenda…**, a fonte, o tamanho, as cores, o contorno, o fundo, a opacidade, a posição e o nome do falante. Atalhos no player: espaço toca e pausa, ← e → voltam e avançam 5 s, F abre a tela cheia e C liga e desliga a legenda. **⌘F** busca palavras no texto (Enter vai para a próxima). As transcrições ficam na lista quando você fecha e abre o app de novo, com os nomes dos falantes que você editou; clique com o botão direito num item para **Transcrever de novo** (com outro modelo, por exemplo) ou **Mostrar na pasta**.
 
 A janela se ajusta a telas pequenas: abaixo de 900 px de largura a barra lateral se recolhe e volta pelo botão no canto superior (⌘⌥S). O tema claro ou escuro acompanha o sistema. As opções menos usadas (número de falantes, separação de vozes, vocabulário, pasta e formatos) ficam em **Mais opções**.
@@ -116,7 +118,7 @@ Transcritor --cli --dispositivos      # lista telas e microfones
 Transcritor --cli --gravar 0 --tela 2 --ao-vivo
 ```
 
-No macOS o executável fica em `/Applications/Transcritor.app/Contents/MacOS/Transcritor`. Opções: `--idioma pt|en|auto|mixed`, `--modelo large-v3-turbo|large-v3|medium|small|parakeet`, `--falantes N`, `--sem-falantes`, `--vocabulario "..."`, `--saida pasta`, `--gravar SEGUNDOS`, `--sem-tela`, `--sem-microfone`, `--tela N`, `--microfone ID`, `--ao-vivo`, `--dispositivos`.
+No macOS o executável fica em `/Applications/Transcritor.app/Contents/MacOS/Transcritor`. Opções: `--idioma pt|en|auto|mixed`, `--modelo large-v3-turbo|large-v3|medium|small|parakeet`, `--falantes N`, `--sem-falantes`, `--vocabulario "..."`, `--saida pasta`, `--inicio HH:MM:SS` e `--fim HH:MM:SS` (só um trecho), `--gravar SEGUNDOS`, `--sem-tela`, `--sem-microfone`, `--tela N`, `--microfone ID`, `--ao-vivo`, `--dispositivos`.
 
 ## Estrutura
 
@@ -131,6 +133,7 @@ No macOS o executável fica em `/Applications/Transcritor.app/Contents/MacOS/Tra
 - `src/transcritor/history.py`: histórico de transcrições entre sessões
 - `src/transcritor/app.py`: interface (PySide6)
 - `src/transcritor/style.py`: cores dos temas claro e escuro, folha de estilo e ícones desenhados
+- `src/transcritor/trim.py`: janela de corte (escolher o trecho, transcrever só ele ou salvar como vídeo)
 - `src/transcritor/player.py`: player de vídeo com legenda, velocidade, tela cheia e configurações da legenda
 - `src/transcritor/widgets.py`: lista de arquivos, leitura da transcrição, nomes dos falantes e layout que quebra linha
 - `packaging/`: PyInstaller, DMG, Inno Setup e gerador de ícones
